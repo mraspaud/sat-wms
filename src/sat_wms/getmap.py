@@ -24,6 +24,11 @@ _os.environ.setdefault("GDAL_CACHEMAX", "512")
 # Sized to cpu_count so we don't over-subscribe across concurrent renders.
 _READ_POOL = ThreadPoolExecutor(max_workers=_os.cpu_count())
 
+# Limit concurrent renders per worker to prevent _READ_POOL starvation when
+# many requests arrive simultaneously. Sized to cpu_count so each render
+# gets roughly one CPU worth of file-read threads.
+_RENDER_SEM = asyncio.Semaphore(_os.cpu_count())
+
 
 @dataclass
 class WmsParams:
@@ -135,5 +140,6 @@ async def generate_map(mda, params: dict, duration: timedelta) -> Response:
         return Response(content=_empty_png(p.width, p.height), media_type="image/png",
                         headers=headers)
 
-    png = await asyncio.to_thread(_render, filepaths, p.bbox, p.width, p.height, p.crs)
+    async with _RENDER_SEM:
+        png = await asyncio.to_thread(_render, filepaths, p.bbox, p.width, p.height, p.crs)
     return Response(content=png, media_type="image/png", headers=headers)
