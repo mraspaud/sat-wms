@@ -38,22 +38,24 @@ class MetadataRepository:
     async def get_map_assets(self, layer_name, bbox_list, start_dt, end_dt, src_srid=3575):
         """Return filenames of granules intersecting the bbox within the time window."""
         minx, miny, maxx, maxy = bbox_list
+        # For geographic CRS (degrees), segmentize the bbox before reprojecting so that
+        # the curved edges in polar projections are faithfully represented. For projected
+        # CRS (metres), segmentize is not needed and would generate millions of vertices.
+        envelope_sql = (
+            "ST_Segmentize(ST_MakeEnvelope(%(minx)s, %(miny)s, %(maxx)s, %(maxy)s, %(srid)s), 1.0)"
+            if src_srid == 4326
+            else "ST_MakeEnvelope(%(minx)s, %(miny)s, %(maxx)s, %(maxy)s, %(srid)s)"
+        )
         async with await psycopg.AsyncConnection.connect(self.conn_info, row_factory=dict_row) as conn:
             async with conn.cursor() as cur:
-                await cur.execute("""
+                await cur.execute(f"""
                     SELECT filename FROM public.products_viirs
                     WHERE product_name = %(layer_name)s
                       AND time >= %(start_dt)s
                       AND time <= %(end_dt)s
                       AND ST_Intersects(
                             geom,
-                            ST_Transform(
-                                ST_Segmentize(
-                                    ST_MakeEnvelope(%(minx)s, %(miny)s, %(maxx)s, %(maxy)s, %(srid)s),
-                                    1.0
-                                ),
-                                3575
-                            )
+                            ST_Transform({envelope_sql}, 3575)
                           )
                     ORDER BY time DESC;
                 """, {
