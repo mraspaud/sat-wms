@@ -48,7 +48,10 @@ class MetadataRepository:
                       AND ST_Intersects(
                             geom,
                             ST_Transform(
-                                ST_MakeEnvelope(%(minx)s, %(miny)s, %(maxx)s, %(maxy)s, %(srid)s),
+                                ST_Segmentize(
+                                    ST_MakeEnvelope(%(minx)s, %(miny)s, %(maxx)s, %(maxy)s, %(srid)s),
+                                    1.0
+                                ),
                                 3575
                             )
                           )
