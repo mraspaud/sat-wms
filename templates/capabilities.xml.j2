@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<WMS_Capabilities version="1.3.0" 
+    xmlns="http://www.opengis.net/wms" 
+    xmlns:xlink="http://www.w3.org/1999/xlink">
+    <Service>
+        <Name>WMS</Name>
+        <Title>Nordsat Native VIIRS WMS</Title>
+        <OnlineResource xlink:type="simple" xlink:href="{{ online_resource }}" />
+    </Service>
+    <Capability>
+        <Request>
+            <GetCapabilities>
+                <Format>text/xml</Format>
+                <DCPType><HTTP><Get><OnlineResource xlink:href="{{ online_resource }}" /></Get></HTTP></DCPType>
+            </GetCapabilities>
+            <GetMap>
+                <Format>image/png</Format>
+                <DCPType><HTTP><Get><OnlineResource xlink:href="{{ online_resource }}" /></Get></HTTP></DCPType>
+            </GetMap>
+        </Request>
+        <Layer>
+            <Title>Nordsat VIIRS Products</Title>
+            {%- for layer in layers %}
+            <Layer queryable="0">
+                <Name>{{ layer.layer_name }}</Name>
+                <Title>{{ layer.layer_name }}</Title>
+                <CRS>EPSG:3575</CRS>
+                <CRS>EPSG:3857</CRS>
+                {# Snapped BBOX logic handled in Python #}
+                <BoundingBox CRS="EPSG:3575" 
+                    minx="{{ layer.minx }}" miny="{{ layer.miny }}" 
+                    maxx="{{ layer.maxx }}" maxy="{{ layer.maxy }}" />
+                <Dimension name="time" units="ISO8601" default="{{ layer.end_str }}" nearestValue="1">
+                    {{ layer.start_str }}/{{ layer.end_str }}/PT10M
+                </Dimension>
+            </Layer>
+            {%- endfor %}
+        </Layer>
+    </Capability>
+</WMS_Capabilities>
