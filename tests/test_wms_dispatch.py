@@ -29,3 +29,14 @@ def test_correct_version_is_accepted(client):
     """VERSION=1.3.0 is accepted."""
     res = client.get("/30m/", params={"REQUEST": "GetCapabilities", "VERSION": "1.3.0"})
     assert res.status_code == 200
+
+
+def test_invalid_crs_returns_exception_xml(client):
+    """An unresolvable CRS returns a ServiceException with code InvalidCRS."""
+    res = client.get("/30m/", params={
+        "REQUEST": "GetMap", "VERSION": "1.3.0",
+        "LAYERS": "true_color_day", "CRS": "EPSG:99999",
+        "BBOX": "0,0,1,1", "WIDTH": "256", "HEIGHT": "256",
+    })
+    assert res.status_code == 400
+    assert 'code="InvalidCRS"' in res.text

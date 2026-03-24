@@ -6,8 +6,10 @@ from datetime import timedelta
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.templating import Jinja2Templates
 
 logger = logging.getLogger("sat_wms.access")
+_templates = Jinja2Templates(directory="templates")
 
 from sat_wms.capabilities import generate_capabilities
 from sat_wms.config import config
@@ -26,22 +28,10 @@ async def log_requests(request: Request, call_next):
     logger.info("%s %s %d %.0fms", request.method, request.url, response.status_code, ms)
     return response
 
-_SERVICE_EXCEPTION_TEMPLATE = (
-    '<?xml version="1.0" encoding="UTF-8"?>'
-    '<ServiceExceptionReport version="1.3.0"'
-    ' xmlns="http://www.opengis.net/ogc">'
-    "<ServiceException>{msg}</ServiceException>"
-    "</ServiceExceptionReport>"
-)
-
-
-def _wms_exception(msg: str) -> Response:
+def _wms_exception(msg: str, code: str | None = None) -> Response:
     """Return a WMS 1.3.0 ServiceException response."""
-    return Response(
-        content=_SERVICE_EXCEPTION_TEMPLATE.format(msg=msg),
-        media_type="text/xml",
-        status_code=400,
-    )
+    content = _templates.get_template("service_exception.xml.j2").render(msg=msg, code=code)
+    return Response(content=content, media_type="text/xml", status_code=400)
 
 
 def _parse_duration(s: str) -> timedelta:
@@ -75,7 +65,14 @@ async def wms_endpoint(duration_str: str, request: Request):
                 supported_crs=config.get("supported_crs"),
             )
         case "GetMap":
+            from pyproj.exceptions import CRSError  # noqa: PLC0415
             from sat_wms.getmap import generate_map  # noqa: PLC0415
-            return await generate_map(mda, params, _parse_duration(duration_str))
+            try:
+                return await generate_map(mda, params, _parse_duration(duration_str))
+            except CRSError as exc:
+                return _wms_exception(str(exc), code="InvalidCRS")
+            except Exception as exc:
+                logger.exception("GetMap failed: %s", exc)
+                return _wms_exception(str(exc))
         case _:
             return Response("Unknown REQUEST type", status_code=400)
