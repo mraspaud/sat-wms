@@ -24,8 +24,9 @@
             <Layer queryable="0">
                 <Name>{{ layer.layer_name }}</Name>
                 <Title>{{ layer.layer_name }}</Title>
-                <CRS>EPSG:3575</CRS>
-                <CRS>EPSG:3857</CRS>
+                {%- for crs in supported_crs %}
+                <CRS>{{ crs }}</CRS>
+                {%- endfor %}
                 {# Snapped BBOX logic handled in Python #}
                 <BoundingBox CRS="EPSG:3575" 
                     minx="{{ layer.minx }}" miny="{{ layer.miny }}" 

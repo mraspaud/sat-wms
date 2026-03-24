@@ -1,103 +1,65 @@
-from fastapi.templating import Jinja2Templates
-from fastapi import Request
-from datetime import datetime
+"""WMS server entry point."""
+import re
+from datetime import timedelta
 
-import os
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
 
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy import text
+from sat_wms.capabilities import generate_capabilities
+from sat_wms.config import config
+from sat_wms.local_mda import make_mda
+from sat_wms.pg_mda import MetadataRepository  # re-exported for tests
 
-# Use 'postgresql+asyncpg' for the modern async driver
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/viirs_db")
+app = FastAPI(title=config.get("wms_title"))
 
-# 1. Create the Engine
-# We use 'NullPool' if we're in a serverless environment, 
-# but for a persistent FastAPI app, the default QueuePool is excellent.
-engine = create_async_engine(DATABASE_URL, echo=False)
+_SERVICE_EXCEPTION_TEMPLATE = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<ServiceExceptionReport version="1.3.0"'
+    ' xmlns="http://www.opengis.net/ogc">'
+    "<ServiceException>{msg}</ServiceException>"
+    "</ServiceExceptionReport>"
+)
 
-# 2. Create a Session Factory
-async_session = async_sessionmaker(engine, expire_on_commit=False)
-BASE_URL = "https://wms-proxy-staging.int-nordmet-nordsat.s.ewcloud.host/viirs"
 
-app = FastAPI()
+def _wms_exception(msg: str) -> Response:
+    """Return a WMS 1.3.0 ServiceException response."""
+    return Response(
+        content=_SERVICE_EXCEPTION_TEMPLATE.format(msg=msg),
+        media_type="text/xml",
+        status_code=400,
+    )
 
-# Initialize templates
-templates = Jinja2Templates(directory="templates")
+
+def _parse_duration(s: str) -> timedelta:
+    """Parse a duration string like '30m', '2h', '1d' into a timedelta."""
+    match = re.fullmatch(r"(\d+)(m|h|d)", s)
+    if not match:
+        return timedelta(hours=1)
+    value, unit = int(match.group(1)), match.group(2)
+    return {"m": timedelta(minutes=value), "h": timedelta(hours=value), "d": timedelta(days=value)}[unit]
+
 
 @app.get("/{duration_str}/")
-async def wms_capabilities(duration_str: str, request: Request):
+async def wms_endpoint(duration_str: str, request: Request):
+    """Dispatch WMS requests."""
     params = {k.upper(): v for k, v in request.query_params.items()}
 
-    if params.get("REQUEST", params.get("request")) == "GetCapabilities":
-        # 1. Fetch data from PostGIS
-        raw_layers = await get_layer_metadata()
+    version = params.get("VERSION")
+    if version and version != "1.3.0":
+        return _wms_exception(f"VERSION {version!r} is not supported; only 1.3.0 is implemented.")
 
-        # 2. Pre-process data for the template (flooring times, etc.)
-        processed_layers = []
-        for l in raw_layers:
-            # Handle the BBOX string (parsing the BOX() format)
-            b = l['bbox'].replace('BOX(', '').replace(')', '').replace(',', ' ').split()
-            processed_layers.append({
-                "layer_name": l['layer_name'],
-                "start_str": floor_dt(l['start_time']).strftime("%Y-%m-%dT%H:%M:00Z"),
-                "end_str": floor_dt(l['end_time']).strftime("%Y-%m-%dT%H:%M:00Z"),
-                "minx": b[0], "miny": b[1], "maxx": b[2], "maxy": b[3]
-            })
+    mda = make_mda(config.get("database_url"))
+    online_resource = f"{config.get('base_url')}/{duration_str}/"
 
-        # 3. Render the template
-        return templates.TemplateResponse(
-            "capabilities.xml", 
-            {
-                "request": request, 
-                "layers": processed_layers,
-                "online_resource": f"{BASE_URL}/{duration_str}/"
-            },
-            media_type="text/xml"
-        )
-
-    return Response("GetMap implementation pending.", status_code=200)
-
-def floor_dt(dt: datetime, interval_min: int = 10) -> datetime:
-    """Floors datetime to the grid (e.g., 12:08 -> 12:00)."""
-    return dt.replace(minute=(dt.minute // interval_min) * interval_min, 
-                      second=0, microsecond=0)
-
-
-async def get_layer_metadata():
-    """Modern SQLAlchemy 2.0 Async Query."""
-    async with async_session() as session:
-        # We use 'text()' for raw SQL, or we could use the ORM/Core builder.
-        # ST_AsText or ST_Extent works perfectly here.
-        stmt = text("""
-            SELECT 
-                layer_name, 
-                MIN(timestamp) as start_time, 
-                MAX(timestamp) as end_time,
-                ST_Extent(geom) as bbox
-            FROM viirs_metadata
-            GROUP BY layer_name;
-        """)
-        
-        result = await session.execute(stmt)
-        # SQLAlchemy returns 'Row' objects which act like dictionaries
-        return result.mappings().all()
-
-class MetadataRepository:
-    def __init__(self, conn_info: str):
-        self.conn_info = conn_info
-
-    async def get_layers(self):
-        """Query using the actual schema: products_viirs."""
-        async with await psycopg.AsyncConnection.connect(self.conn_info, row_factory=dict_row) as aconn:
-            async with aconn.cursor() as cur:
-                await cur.execute("""
-                    SELECT 
-                        product_name as layer_name, 
-                        MIN(time) as start_time, 
-                        MAX(time) as end_time, 
-                        ST_Extent(geom) as bbox
-                    FROM public.products_viirs 
-                    GROUP BY product_name;
-                """)
-                return await cur.fetchall()
+    match params.get("REQUEST"):
+        case "GetCapabilities":
+            return await generate_capabilities(
+                mda,
+                request=request,
+                online_resource=online_resource,
+                supported_crs=config.get("supported_crs"),
+            )
+        case "GetMap":
+            from sat_wms.getmap import generate_map  # noqa: PLC0415
+            return await generate_map(mda, params, _parse_duration(duration_str))
+        case _:
+            return Response("Unknown REQUEST type", status_code=400)
