@@ -61,7 +61,7 @@ class LocalMetadataRepository:
             and g["geom"].intersects(query_box)
         ]
         matches.sort(key=lambda g: g["time"], reverse=True)
-        return [g["filename"] for g in matches[:10]]
+        return [g["filename"] for g in matches]
 
 
 def make_mda(conn_str: str):

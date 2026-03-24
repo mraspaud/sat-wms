@@ -2,9 +2,6 @@
 import psycopg
 from psycopg.rows import dict_row
 
-from sat_wms.config import config
-
-
 class MetadataRepository:
     """PostGIS-backed metadata repository."""
 
@@ -44,15 +41,13 @@ class MetadataRepository:
                                 3575
                             )
                           )
-                    ORDER BY time DESC
-                    LIMIT %(limit)s;
+                    ORDER BY time DESC;
                 """, {
                     "layer_name": layer_name,
                     "start_dt": start_dt,
                     "end_dt": end_dt,
                     "minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy,
                     "srid": src_srid,
-                    "limit": config.get("max_granules"),
                 })
                 rows = await cur.fetchall()
                 return [row["filename"] for row in rows]
