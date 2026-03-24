@@ -1,9 +1,13 @@
 """WMS server entry point."""
+import logging
 import re
+import time
 from datetime import timedelta
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+
+logger = logging.getLogger("sat_wms.access")
 
 from sat_wms.capabilities import generate_capabilities
 from sat_wms.config import config
@@ -11,6 +15,16 @@ from sat_wms.local_mda import make_mda
 
 app = FastAPI(title=config.get("wms_title"))
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"])
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log each request with timestamp and duration."""
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    ms = (time.perf_counter() - t0) * 1000
+    logger.info("%s %s %d %.0fms", request.method, request.url, response.status_code, ms)
+    return response
 
 _SERVICE_EXCEPTION_TEMPLATE = (
     '<?xml version="1.0" encoding="UTF-8"?>'
