@@ -38,13 +38,12 @@ class MetadataRepository:
     async def get_map_assets(self, layer_name, bbox_list, start_dt, end_dt, src_srid=3575):
         """Return filenames of granules intersecting the bbox within the time window."""
         minx, miny, maxx, maxy = bbox_list
-        # For geographic CRS (degrees), segmentize the bbox before reprojecting so that
-        # the curved edges in polar projections are faithfully represented. For projected
-        # CRS (metres), segmentize is not needed and would generate millions of vertices.
+        # Segmentize the bbox before reprojecting to EPSG:3575 so that curved edges
+        # (e.g. latitude lines in polar projections) are faithfully represented.
+        # Units match the source CRS: degrees for geographic (4326), metres for projected.
+        seg_length = "1.0" if src_srid == 4326 else "1e5"
         envelope_sql = (
-            "ST_Segmentize(ST_MakeEnvelope(%(minx)s, %(miny)s, %(maxx)s, %(maxy)s, %(srid)s), 1.0)"
-            if src_srid == 4326
-            else "ST_MakeEnvelope(%(minx)s, %(miny)s, %(maxx)s, %(maxy)s, %(srid)s)"
+            f"ST_Segmentize(ST_MakeEnvelope(%(minx)s, %(miny)s, %(maxx)s, %(maxy)s, %(srid)s), {seg_length})"
         )
         async with await psycopg.AsyncConnection.connect(self.conn_info, row_factory=dict_row) as conn:
             async with conn.cursor() as cur:
