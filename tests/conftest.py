@@ -38,6 +38,9 @@ def synth_mda(test_tif):
         def __init__(self, path):
             self.path = path
 
+        async def get_latest_time(self, layer_name):
+            return None
+
         async def get_map_assets(self, *args, **kwargs):
             return [self.path]
 

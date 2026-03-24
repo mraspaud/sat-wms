@@ -1,7 +1,7 @@
 """Get capabilities."""
 from fastapi.templating import Jinja2Templates
 
-from sat_wms.time_utils import floor_dt
+from sat_wms.time_utils import ceil_dt, floor_dt
 
 templates = Jinja2Templates(directory="templates")
 
@@ -15,7 +15,7 @@ async def generate_capabilities(mda, request=None, online_resource=None, support
         processed_layers.append({
             "layer_name": layer["layer_name"],
             "start_str": floor_dt(layer["start_time"]).strftime("%Y-%m-%dT%H:%M:00Z"),
-            "end_str": floor_dt(layer["end_time"]).strftime("%Y-%m-%dT%H:%M:00Z"),
+            "end_str": ceil_dt(layer["end_time"]).strftime("%Y-%m-%dT%H:%M:00Z"),
             "minx": b[0], "miny": b[1], "maxx": b[2], "maxy": b[3],
         })
 

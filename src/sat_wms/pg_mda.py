@@ -24,6 +24,17 @@ class MetadataRepository:
                 """)
                 return await cur.fetchall()
 
+    async def get_latest_time(self, layer_name):
+        """Return the timestamp of the most recent granule for a layer, or None."""
+        async with await psycopg.AsyncConnection.connect(self.conn_info, row_factory=dict_row) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT MAX(time) AS t FROM public.products_viirs WHERE product_name = %s",
+                    (layer_name,),
+                )
+                row = await cur.fetchone()
+                return row["t"] if row else None
+
     async def get_map_assets(self, layer_name, bbox_list, start_dt, end_dt, src_srid=3575):
         """Return filenames of granules intersecting the bbox within the time window."""
         minx, miny, maxx, maxy = bbox_list

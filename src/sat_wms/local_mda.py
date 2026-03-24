@@ -51,6 +51,11 @@ class LocalMetadataRepository:
             })
         return results
 
+    async def get_latest_time(self, layer_name):
+        """Return the timestamp of the most recent granule for a layer, or None."""
+        times = [g["time"] for g in self.granules if g["product_name"] == layer_name]
+        return max(times) if times else None
+
     async def get_map_assets(self, layer_name, bbox_list, start_dt, end_dt, src_srid=3575):
         """Simulate ST_Intersects + time filter. src_srid is ignored (geometries share the same CRS)."""
         query_box = box(*bbox_list)

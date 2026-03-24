@@ -4,16 +4,17 @@ import io
 import os as _os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import numpy as np
+import pyproj
 import rasterio
 from fastapi import Response
 from rasterio.crs import CRS
 from rio_tiler.io import COGReader
 from rio_tiler.models import ImageData
 
-from sat_wms.time_utils import floor_dt
+from sat_wms.time_utils import ceil_dt, floor_dt
 
 # Increase GDAL tile cache if not already configured — dramatically speeds up
 # repeated reads of the same GeoTIFF tiles across requests.
@@ -40,9 +41,14 @@ class WmsParams:
 def _parse_params(params: dict) -> WmsParams:
     """Parse and validate raw WMS query parameters."""
     layer_name = params["LAYERS"]
-    bbox = tuple(float(v) for v in params["BBOX"].split(","))
     crs = params["CRS"]
     srid = int(crs.split(":")[1])
+    bbox = tuple(float(v) for v in params["BBOX"].split(","))
+    # WMS 1.3.0 uses CRS-defined axis order. Geographic CRS like EPSG:4326 are
+    # lat/lon (latitude first), so BBOX arrives as (minlat, minlon, maxlat, maxlon).
+    # Swap to (minlon, minlat, maxlon, maxlat) for consistent easting-first handling.
+    if pyproj.CRS.from_authority(*crs.split(":")).is_geographic:
+        bbox = (bbox[1], bbox[0], bbox[3], bbox[2])
     width = int(params["WIDTH"])
     height = int(params["HEIGHT"])
     time_str = params.get("TIME")
@@ -113,12 +119,21 @@ async def generate_map(mda, params: dict, duration: timedelta) -> Response:
     end_dt = floor_dt(p.time)
     start_dt = end_dt - duration
 
+    # Short TTL if this is the latest available timestep (data may still be arriving).
+    # Compare end_dt against ceil of the actual latest granule time — not wall clock,
+    # since data can lag real time by 20+ minutes.
+    latest = await mda.get_latest_time(p.layer_name)
+    is_latest = latest is not None and ceil_dt(latest) == end_dt
+    cache_control = "public, max-age=60" if is_latest else "public, max-age=3600"
+    headers = {"Cache-Control": cache_control}
+
     filepaths = await mda.get_map_assets(
         p.layer_name, list(p.bbox), start_dt, end_dt, src_srid=p.srid,
     )
 
     if not filepaths:
-        return Response(content=_empty_png(p.width, p.height), media_type="image/png")
+        return Response(content=_empty_png(p.width, p.height), media_type="image/png",
+                        headers=headers)
 
     png = await asyncio.to_thread(_render, filepaths, p.bbox, p.width, p.height, p.crs)
-    return Response(content=png, media_type="image/png")
+    return Response(content=png, media_type="image/png", headers=headers)

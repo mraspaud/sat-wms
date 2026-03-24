@@ -95,6 +95,9 @@ async def test_generate_map_time_window(local_mda):
     captured = []
 
     class CaptureMDA:
+        async def get_latest_time(self, layer_name):
+            return None
+
         async def get_map_assets(self, layer_name, bbox_list, start_dt, end_dt, src_srid=3575):
             captured.append((start_dt, end_dt))
             return []
@@ -103,6 +106,23 @@ async def test_generate_map_time_window(local_mda):
     start, end = captured[0]
     assert end.minute == 10
     assert start.minute == 5
+
+
+def test_parse_params_epsg4326_swaps_axes():
+    """EPSG:4326 BBOX (minlat,minlon,maxlat,maxlon) is swapped to (minlon,minlat,...)."""
+    from sat_wms.getmap import _parse_params
+
+    params = {**VALID_PARAMS, "CRS": "EPSG:4326", "BBOX": "60.0,-30.0,80.0,40.0"}
+    result = _parse_params(params)
+    assert result.bbox == (-30.0, 60.0, 40.0, 80.0)
+
+
+def test_parse_params_epsg3575_no_axis_swap():
+    """EPSG:3575 BBOX is not swapped (easting-first CRS)."""
+    from sat_wms.getmap import _parse_params
+
+    result = _parse_params(VALID_PARAMS)
+    assert result.bbox == (-1320000.0, -2781000.0, 569250.0, 245250.0)
 
 
 @pytest.mark.asyncio
