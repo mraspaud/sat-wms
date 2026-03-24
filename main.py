@@ -3,12 +3,14 @@ import re
 from datetime import timedelta
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 from sat_wms.capabilities import generate_capabilities
 from sat_wms.config import config
 from sat_wms.local_mda import make_mda
 
 app = FastAPI(title=config.get("wms_title"))
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"])
 
 _SERVICE_EXCEPTION_TEMPLATE = (
     '<?xml version="1.0" encoding="UTF-8"?>'
