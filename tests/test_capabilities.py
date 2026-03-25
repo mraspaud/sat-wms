@@ -12,6 +12,16 @@ async def test_generate_capabilities(local_mda):
 
 
 @pytest.mark.asyncio
+async def test_capabilities_dimension_uses_configured_interval(local_mda):
+    """The Dimension step and floor/ceil reflect the supplied interval."""
+    from sat_wms.capabilities import generate_capabilities
+
+    res = await generate_capabilities(local_mda, interval_min=5)
+    xml = res.body.decode()
+    assert "PT5M" in xml
+
+
+@pytest.mark.asyncio
 async def test_capabilities_default_is_raw_latest_time(local_mda):
     """The Dimension default is the raw latest granule time (not ceiled) for cache busting."""
     from sat_wms.capabilities import generate_capabilities

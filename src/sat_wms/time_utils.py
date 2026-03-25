@@ -1,5 +1,16 @@
 """Time utility functions."""
+import re
 from datetime import datetime, timedelta
+
+
+def parse_interval_min(s: str) -> int:
+    """Parse a human-readable interval string into minutes (e.g. '5m' → 5, '1h' → 60)."""
+    m = re.fullmatch(r"(\d+)(m|h)", s)
+    if not m:
+        msg = f"Invalid interval {s!r}; expected format like '10m' or '1h'."
+        raise ValueError(msg)
+    value, unit = int(m.group(1)), m.group(2)
+    return value if unit == "m" else value * 60
 
 
 def floor_dt(dt: datetime, interval_min: int = 10) -> datetime:

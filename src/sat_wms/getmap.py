@@ -118,16 +118,16 @@ def _empty_png(width, height):
     return buf.getvalue()
 
 
-async def generate_map(mda, params: dict, duration: timedelta) -> Response:
+async def generate_map(mda, params: dict, duration: timedelta, interval_min: int = 10) -> Response:
     """Handle a WMS GetMap request."""
     p = _parse_params(params)
     end_dt = p.time
     start_dt = end_dt - duration
 
-    # Short TTL if the requested time falls in the same 10-minute bucket as the
+    # Short TTL if the requested time falls in the same interval bucket as the
     # latest granule — new data may still be arriving for this window.
     latest = await mda.get_latest_time(p.layer_name)
-    is_latest = latest is not None and floor_dt(latest) == floor_dt(end_dt)
+    is_latest = latest is not None and floor_dt(latest, interval_min) == floor_dt(end_dt, interval_min)
     cache_control = "public, max-age=60" if is_latest else "public, max-age=3600"
     headers = {"Cache-Control": cache_control}
 

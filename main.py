@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 from sat_wms.capabilities import generate_capabilities
 from sat_wms.config import config
 from sat_wms.local_mda import make_mda
+from sat_wms.time_utils import parse_interval_min
 
 logger = logging.getLogger("sat_wms.access")
 _templates = Jinja2Templates(directory="templates")
@@ -73,6 +74,7 @@ async def wms_endpoint(duration_str: str, request: Request):
 
     mda = request.app.state.mda
     online_resource = f"{config.get('base_url')}/{duration_str}/"
+    interval_min = parse_interval_min(config.get("granule_interval"))
 
     match params.get("REQUEST"):
         case "GetCapabilities":
@@ -81,13 +83,14 @@ async def wms_endpoint(duration_str: str, request: Request):
                 request=request,
                 online_resource=online_resource,
                 supported_crs=config.get("supported_crs"),
+                interval_min=interval_min,
             )
         case "GetMap":
             from pyproj.exceptions import CRSError  # noqa: PLC0415
 
             from sat_wms.getmap import generate_map  # noqa: PLC0415
             try:
-                return await generate_map(mda, params, _parse_duration(duration_str))
+                return await generate_map(mda, params, _parse_duration(duration_str), interval_min=interval_min)
             except CRSError as exc:
                 return _wms_exception(str(exc), code="InvalidCRS")
             except Exception as exc:
