@@ -144,6 +144,16 @@ def test_parse_params_epsg3575_no_axis_swap():
     assert result.bbox == (-1320000.0, -2781000.0, 569250.0, 245250.0)
 
 
+def test_is_geographic_caches_pyproj_lookup():
+    """_is_geographic caches pyproj lookups so the EPSG database is hit only once per CRS."""
+    from sat_wms.getmap import _is_geographic
+
+    _is_geographic.cache_clear()
+    _is_geographic("EPSG:4326")
+    _is_geographic("EPSG:4326")
+    assert _is_geographic.cache_info().hits == 1
+
+
 def test_empty_png_caches_result():
     """_empty_png returns the same bytes object for identical dimensions (LRU cache hit)."""
     from sat_wms.getmap import _empty_png

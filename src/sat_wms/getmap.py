@@ -1,15 +1,15 @@
 """GetMap request handler."""
 import asyncio
 import functools
-import io
 import os as _os
+import struct
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pyproj
-import rasterio
 from fastapi import Response
 from rasterio.crs import CRS
 from rio_tiler.io import COGReader
@@ -46,6 +46,13 @@ class WmsParams:
     time: datetime
 
 
+@functools.lru_cache(maxsize=16)
+def _is_geographic(crs: str) -> bool:
+    """Return True if the CRS uses geographic (lat/lon) axis order (cached)."""
+    authority, code = crs.split(":")
+    return pyproj.CRS.from_authority(authority, code).is_geographic
+
+
 def _parse_params(params: dict) -> WmsParams:
     """Parse and validate raw WMS query parameters."""
     layer_name = params["LAYERS"]
@@ -55,7 +62,7 @@ def _parse_params(params: dict) -> WmsParams:
     # WMS 1.3.0 uses CRS-defined axis order. Geographic CRS like EPSG:4326 are
     # lat/lon (latitude first), so BBOX arrives as (minlat, minlon, maxlat, maxlon).
     # Swap to (minlon, minlat, maxlon, maxlat) for consistent easting-first handling.
-    if pyproj.CRS.from_authority(*crs.split(":")).is_geographic:
+    if _is_geographic(crs):
         bbox = (bbox[1], bbox[0], bbox[3], bbox[2])
     width = int(params["WIDTH"])
     height = int(params["HEIGHT"])
@@ -77,46 +84,17 @@ def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int) -> Im
         return cog.part(bbox, bounds_crs=dst, dst_crs=dst, width=width, height=height)
 
 
-def _render(filepaths, bbox, width, height, dst_crs):
-    """Read all GeoTIFFs in parallel, composite newest-first, return PNG bytes.
-
-    Composites as each future arrives (streaming): once the canvas is full,
-    remaining slow futures are skipped rather than waited on.
-
-    Runs synchronously — call via asyncio.to_thread so the event loop
-    stays free to accept other requests while GDAL does I/O.
-    """
-    futures = [_READ_POOL.submit(_read_one, fp, bbox, dst_crs, width, height) for fp in filepaths]
-    result = None
-    for f in futures:
-        img = f.result()
-        if result is None:
-            result = img
-            continue
-        if not np.any(result.array.mask):
-            break  # canvas full; skip remaining futures
-        no_data = np.all(result.array.mask, axis=0, keepdims=True)
-        data = np.where(no_data, img.array.data, result.array.data)
-        mask = np.broadcast_to(
-            no_data & np.all(img.array.mask, axis=0, keepdims=True),
-            data.shape,
-        ).copy()
-        result = ImageData(np.ma.MaskedArray(data, mask), bounds=result.bounds, crs=result.crs)
-    return result.render(img_format="PNG", zlevel=1)
-
-
 @functools.lru_cache(maxsize=32)
 def _empty_png(width: int, height: int) -> bytes:
-    """Return a transparent PNG of the given dimensions (cached per size)."""
-    data = np.zeros((4, height, width), dtype=np.uint8)
-    buf = io.BytesIO()
-    with rasterio.MemoryFile() as mem:
-        with mem.open(driver="PNG", width=width, height=height, count=4,
-                      dtype=np.uint8,
-                      transform=rasterio.transform.from_bounds(0, 0, 1, 1, width, height)) as dst:
-            dst.write(data)
-        buf.write(mem.read())
-    return buf.getvalue()
+    """Return a fully transparent RGBA PNG using stdlib only (cached per size)."""
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+    raw = b"\x00" * (height * (width * 4 + 1))  # filter-none byte + RGBA zeros per row
+    idat = chunk(b"IDAT", zlib.compress(raw, 1))
+    iend = chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + ihdr + idat + iend
 
 
 async def generate_map(mda, params: dict, duration: timedelta, interval_min: int = 10) -> Response:
@@ -142,5 +120,26 @@ async def generate_map(mda, params: dict, duration: timedelta, interval_min: int
                         headers=headers)
 
     async with _RENDER_SEM:
-        png = await asyncio.to_thread(_render, filepaths, p.bbox, p.width, p.height, p.crs)
+        loop = asyncio.get_running_loop()
+        # Submit all reads to the pool simultaneously so they run in parallel,
+        # then await them in list order (newest file first = highest composite priority).
+        aws = [loop.run_in_executor(_READ_POOL, _read_one, fp, p.bbox, p.crs, p.width, p.height)
+               for fp in filepaths]
+        result = None
+        for aw in aws:
+            img = await aw
+            if result is None:
+                result = img
+                continue
+            if not np.any(result.array.mask):
+                break  # canvas full; remaining reads continue in pool but we don't wait
+            no_data = np.all(result.array.mask, axis=0, keepdims=True)
+            data = np.where(no_data, img.array.data, result.array.data)
+            mask = np.broadcast_to(
+                no_data & np.all(img.array.mask, axis=0, keepdims=True),
+                data.shape,
+            ).copy()
+            result = ImageData(np.ma.MaskedArray(data, mask), bounds=result.bounds, crs=result.crs)
+        png = await loop.run_in_executor(None, functools.partial(result.render, img_format="PNG", zlevel=1))
+
     return Response(content=png, media_type="image/png", headers=headers)
