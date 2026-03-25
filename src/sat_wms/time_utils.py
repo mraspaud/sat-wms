@@ -2,6 +2,20 @@
 import re
 from datetime import datetime, timedelta
 
+_DURATION_RE = re.compile(r"(\d+)(m|h|d)")
+
+
+def parse_duration(s: str) -> timedelta:
+    """Parse a duration string like '30m', '2h', '1d' into a timedelta.
+
+    Falls back to 1 hour for unrecognised formats.
+    """
+    m = _DURATION_RE.fullmatch(s)
+    if not m:
+        return timedelta(hours=1)
+    value, unit = int(m.group(1)), m.group(2)
+    return {"m": timedelta(minutes=value), "h": timedelta(hours=value), "d": timedelta(days=value)}[unit]
+
 
 def parse_interval_min(s: str) -> int:
     """Parse a human-readable interval string into minutes (e.g. '5m' → 5, '1h' → 60)."""

@@ -6,6 +6,12 @@ from sat_wms.time_utils import ceil_dt, floor_dt
 templates = Jinja2Templates(directory="templates")
 
 
+def _parse_postgis_box(bbox_str: str) -> tuple[str, str, str, str]:
+    """Parse a PostGIS ST_Extent string 'BOX(x0 y0, x1 y1)' into (x0, y0, x1, y1)."""
+    coords = bbox_str.replace("BOX(", "").replace(")", "").replace(",", " ").split()
+    return coords[0], coords[1], coords[2], coords[3]
+
+
 async def generate_capabilities(
     mda, request=None, online_resource=None, supported_crs=None, interval_min: int = 10, force_webp: bool = False
 ):
@@ -13,13 +19,13 @@ async def generate_capabilities(
     raw_layers = await mda.get_layers()
     processed_layers = []
     for layer in raw_layers:
-        b = layer["bbox"].replace("BOX(", "").replace(")", "").replace(",", " ").split()
+        minx, miny, maxx, maxy = _parse_postgis_box(layer["bbox"])
         processed_layers.append({
             "layer_name": layer["layer_name"],
             "start_str": floor_dt(layer["start_time"], interval_min).strftime("%Y-%m-%dT%H:%M:00Z"),
             "end_str": layer["end_time"].strftime("%Y-%m-%dT%H:%M:%SZ"),
             "end_range_str": ceil_dt(layer["end_time"], interval_min).strftime("%Y-%m-%dT%H:%M:00Z"),
-            "minx": b[0], "miny": b[1], "maxx": b[2], "maxy": b[3],
+            "minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy,
         })
 
     return templates.TemplateResponse(

@@ -114,6 +114,23 @@ def _empty_image(width: int, height: int, img_format: str) -> bytes:
     return ImageData(data).render(img_format=img_format)
 
 
+def _cache_control(latest, end_dt: datetime, interval_min: int) -> str:
+    """Return an appropriate Cache-Control header value for a GetMap response."""
+    is_latest = latest is not None and floor_dt(latest, interval_min) == floor_dt(end_dt, interval_min)
+    return "public, max-age=60" if is_latest else "public, max-age=3600"
+
+
+def _merge(base: ImageData, overlay: ImageData) -> ImageData:
+    """Paint overlay pixels onto the transparent areas of base."""
+    no_data = np.all(base.array.mask, axis=0, keepdims=True)
+    data = np.where(no_data, overlay.array.data, base.array.data)
+    mask = np.broadcast_to(
+        no_data & np.all(overlay.array.mask, axis=0, keepdims=True),
+        data.shape,
+    ).copy()
+    return ImageData(np.ma.MaskedArray(data, mask), bounds=base.bounds, crs=base.crs)
+
+
 async def generate_map(
     mda, params: dict, duration: timedelta, interval_min: int = 10,
     force_webp: bool = False, empty_no_content: bool = False,
@@ -131,11 +148,7 @@ async def generate_map(
         mda.get_map_assets(p.layer_name, list(p.bbox), start_dt, end_dt, src_srid=p.srid),
     )
 
-    # Short TTL if the requested time falls in the same interval bucket as the
-    # latest granule — new data may still be arriving for this window.
-    is_latest = latest is not None and floor_dt(latest, interval_min) == floor_dt(end_dt, interval_min)
-    cache_control = "public, max-age=60" if is_latest else "public, max-age=3600"
-    headers = {"Cache-Control": cache_control}
+    headers = {"Cache-Control": _cache_control(latest, end_dt, interval_min)}
 
     media_type = _MEDIA_TYPES[p.fmt]
 
@@ -159,13 +172,7 @@ async def generate_map(
                 continue
             if not np.any(result.array.mask):
                 break  # canvas full; remaining reads continue in pool but we don't wait
-            no_data = np.all(result.array.mask, axis=0, keepdims=True)
-            data = np.where(no_data, img.array.data, result.array.data)
-            mask = np.broadcast_to(
-                no_data & np.all(img.array.mask, axis=0, keepdims=True),
-                data.shape,
-            ).copy()
-            result = ImageData(np.ma.MaskedArray(data, mask), bounds=result.bounds, crs=result.crs)
+            result = _merge(result, img)
         render_kwargs = {"img_format": p.fmt} if p.fmt != "PNG" else {"img_format": "PNG", "zlevel": 1}
         image = await loop.run_in_executor(None, functools.partial(result.render, **render_kwargs))
 

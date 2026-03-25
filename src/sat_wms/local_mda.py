@@ -69,9 +69,6 @@ class LocalMetadataRepository:
         return [g["filename"] for g in matches]
 
 
-def make_mda(conn_str: str):
-    """Return a LocalMetadataRepository for .csv paths, else a MetadataRepository."""
-    if conn_str.endswith(".csv"):
-        return LocalMetadataRepository(conn_str)
-    from sat_wms.pg_mda import MetadataRepository  # noqa: PLC0415 (avoid circular at module load)
-    return MetadataRepository(conn_str)
+def make_mda(conn_str: str) -> "LocalMetadataRepository":
+    """Return a LocalMetadataRepository loaded from a CSV file."""
+    return LocalMetadataRepository(conn_str)

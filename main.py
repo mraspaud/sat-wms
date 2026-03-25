@@ -1,9 +1,7 @@
 """WMS server entry point."""
 import contextlib
 import logging
-import re
 import time
-from datetime import timedelta
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +10,7 @@ from fastapi.templating import Jinja2Templates
 from sat_wms.capabilities import generate_capabilities
 from sat_wms.config import config
 from sat_wms.local_mda import make_mda
-from sat_wms.time_utils import parse_interval_min
+from sat_wms.time_utils import parse_duration, parse_interval_min
 
 logger = logging.getLogger("sat_wms.access")
 _templates = Jinja2Templates(directory="templates")
@@ -53,15 +51,6 @@ def _wms_exception(msg: str, code: str | None = None) -> Response:
     return Response(content=content, media_type="text/xml", status_code=400)
 
 
-def _parse_duration(s: str) -> timedelta:
-    """Parse a duration string like '30m', '2h', '1d' into a timedelta."""
-    match = re.fullmatch(r"(\d+)(m|h|d)", s)
-    if not match:
-        return timedelta(hours=1)
-    value, unit = int(match.group(1)), match.group(2)
-    return {"m": timedelta(minutes=value), "h": timedelta(hours=value), "d": timedelta(days=value)}[unit]
-
-
 @app.get("/{duration_str}/")
 @app.get("/{duration_str}")
 async def wms_endpoint(duration_str: str, request: Request):
@@ -93,7 +82,7 @@ async def wms_endpoint(duration_str: str, request: Request):
 
             from sat_wms.getmap import generate_map  # noqa: PLC0415
             try:
-                return await generate_map(mda, params, _parse_duration(duration_str),
+                return await generate_map(mda, params, parse_duration(duration_str),
                                           interval_min=interval_min,
                                           force_webp=force_webp,
                                           empty_no_content=empty_no_content)
