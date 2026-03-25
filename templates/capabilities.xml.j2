@@ -32,7 +32,7 @@
                     minx="{{ layer.minx }}" miny="{{ layer.miny }}" 
                     maxx="{{ layer.maxx }}" maxy="{{ layer.maxy }}" />
                 <Dimension name="time" units="ISO8601" default="{{ layer.end_str }}" nearestValue="1">
-                    {{ layer.start_str }}/{{ layer.end_str }}/PT10M
+                    {{ layer.start_str }}/{{ layer.end_range_str }}/PT10M
                 </Dimension>
             </Layer>
             {%- endfor %}
