@@ -115,7 +115,8 @@ def _empty_image(width: int, height: int, img_format: str) -> bytes:
 
 
 async def generate_map(
-    mda, params: dict, duration: timedelta, interval_min: int = 10, force_webp: bool = False
+    mda, params: dict, duration: timedelta, interval_min: int = 10,
+    force_webp: bool = False, empty_no_content: bool = False,
 ) -> Response:
     """Handle a WMS GetMap request."""
     p = _parse_params(params)
@@ -139,6 +140,8 @@ async def generate_map(
     media_type = _MEDIA_TYPES[p.fmt]
 
     if not filepaths:
+        if empty_no_content:
+            return Response(status_code=204, headers=headers)
         return Response(content=_empty_image(p.width, p.height, p.fmt), media_type=media_type,
                         headers=headers)
 

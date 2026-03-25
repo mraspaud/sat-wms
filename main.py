@@ -76,6 +76,7 @@ async def wms_endpoint(duration_str: str, request: Request):
     online_resource = f"{config.get('base_url')}/{duration_str}/"
     interval_min = parse_interval_min(config.get("granule_interval"))
     force_webp = bool(config.get("force_webp"))
+    empty_no_content = bool(config.get("empty_no_content"))
 
     match params.get("REQUEST"):
         case "GetCapabilities":
@@ -94,7 +95,8 @@ async def wms_endpoint(duration_str: str, request: Request):
             try:
                 return await generate_map(mda, params, _parse_duration(duration_str),
                                           interval_min=interval_min,
-                                          force_webp=force_webp)
+                                          force_webp=force_webp,
+                                          empty_no_content=empty_no_content)
             except CRSError as exc:
                 return _wms_exception(str(exc), code="InvalidCRS")
             except Exception as exc:

@@ -121,6 +121,28 @@ async def test_generate_map_empty_result_is_transparent_png(local_mda):
 
 
 @pytest.mark.asyncio
+async def test_generate_map_empty_no_content_returns_204(local_mda):
+    """empty_no_content=True returns 204 with no body when no granules match."""
+    from sat_wms.getmap import generate_map
+
+    params = {**VALID_PARAMS, "TIME": "2099-01-01T00:00:00Z"}
+    res = await generate_map(local_mda, params, timedelta(hours=1), empty_no_content=True)
+    assert res.status_code == 204
+    assert not res.body
+
+
+@pytest.mark.asyncio
+async def test_generate_map_empty_no_content_false_still_returns_image(local_mda):
+    """empty_no_content=False (default) keeps returning a transparent image."""
+    from sat_wms.getmap import generate_map
+
+    params = {**VALID_PARAMS, "TIME": "2099-01-01T00:00:00Z"}
+    res = await generate_map(local_mda, params, timedelta(hours=1), empty_no_content=False)
+    assert res.status_code == 200
+    assert res.body[:4] == b"\x89PNG"
+
+
+@pytest.mark.asyncio
 async def test_force_webp_overrides_png_request(synth_mda):
     """force_webp=True returns WebP even when the client requests image/png."""
     from sat_wms.getmap import generate_map
