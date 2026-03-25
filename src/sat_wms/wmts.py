@@ -11,17 +11,11 @@ from fastapi.templating import Jinja2Templates
 from rio_tiler.errors import TileOutsideBounds
 
 from sat_wms.config import config
-from sat_wms.getmap import _READ_POOL, _RENDER_SEM, _cache_control, _empty_image, _merge
+from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, cache_control, empty_image, merge_images
 from sat_wms.time_utils import ceil_dt, floor_dt
 from sat_wms.tms_registry import all_tms, build_registry, get_by_name
 
 _templates = Jinja2Templates(directory="templates")
-
-# Build the registry from config at import time.
-build_registry(config.get("supported_crs") or ["EPSG:3575", "EPSG:3857", "EPSG:5041", "EPSG:4326"])
-
-_FORMATS = {"image/png": "PNG", "image/webp": "WEBP"}
-_MEDIA_TYPES = {"PNG": "image/png", "WEBP": "image/webp"}
 
 # Reproject from EPSG:3575 (storage CRS) to WGS84 for ows:WGS84BoundingBox.
 _TO_WGS84 = pyproj.Transformer.from_crs("EPSG:3575", "EPSG:4326", always_xy=True)
@@ -82,10 +76,14 @@ async def generate_wmts_capabilities(
     interval_min: int = 10,
     force_webp: bool = False,
     wmts_max_zoom: int = 9,
+    duration_str: str | None = None,
 ) -> Response:
     """Render the WMTS 1.0.0 GetCapabilities document."""
     if supported_crs:
         build_registry(supported_crs)
+
+    base_title = config.get("wms_title")
+    title = f"{base_title} ({duration_str})" if duration_str else base_title
 
     raw_layers = await mda.get_layers()
     layers = []
@@ -107,7 +105,7 @@ async def generate_wmts_capabilities(
         request,
         "wmts_capabilities.xml.j2",
         context={
-            "title": config.get("wms_title"),
+            "title": title,
             "online_resource": online_resource or "",
             "layers": layers,
             "tms_entries": tms_entries,
@@ -146,7 +144,7 @@ async def generate_tile(
 
     if force_webp:
         fmt = "WEBP"
-    media_type = _MEDIA_TYPES[fmt]
+    media_type = MEDIA_TYPES[fmt]
 
     end_dt = (
         datetime.fromisoformat(time_str.replace("Z", "+00:00"))
@@ -164,17 +162,17 @@ async def generate_tile(
         mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
     )
 
-    headers = {"Cache-Control": _cache_control(latest, end_dt, interval_min)}
+    headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
 
     if not filepaths:
         if empty_no_content:
             return Response(status_code=204, headers=headers)
-        return Response(content=_empty_image(256, 256, fmt), media_type=media_type, headers=headers)
+        return Response(content=empty_image(256, 256, fmt), media_type=media_type, headers=headers)
 
-    async with _RENDER_SEM:
+    async with RENDER_SEM:
         loop = asyncio.get_running_loop()
         aws = [
-            loop.run_in_executor(_READ_POOL, _read_tile, fp, tms_id, x, y, z)
+            loop.run_in_executor(READ_POOL, _read_tile, fp, tms_id, x, y, z)
             for fp in filepaths
         ]
         result = None
@@ -185,7 +183,7 @@ async def generate_tile(
                 continue
             if not np.any(result.array.mask):
                 break
-            result = _merge(result, img)
+            result = merge_images(result, img)
 
         render_kwargs = {"img_format": fmt} if fmt != "PNG" else {"img_format": "PNG", "zlevel": 1}
         image = await loop.run_in_executor(

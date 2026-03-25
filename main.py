@@ -11,6 +11,7 @@ from sat_wms.capabilities import generate_capabilities
 from sat_wms.config import config
 from sat_wms.local_mda import make_mda
 from sat_wms.time_utils import parse_duration, parse_interval_min
+from sat_wms.tms_registry import build_registry
 from sat_wms.wmts import generate_tile, generate_wmts_capabilities
 
 logger = logging.getLogger("sat_wms.access")
@@ -20,6 +21,7 @@ _templates = Jinja2Templates(directory="templates")
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialise shared resources (MDA, connection pool) on startup."""
+    build_registry(config.get("supported_crs") or ["EPSG:3575", "EPSG:3857", "EPSG:5041", "EPSG:4326"])
     conn_str = config.get("database_url")
     if conn_str.endswith(".csv"):
         app.state.mda = make_mda(conn_str)
@@ -52,12 +54,17 @@ def _wms_exception(msg: str, code: str | None = None) -> Response:
     return Response(content=content, media_type="text/xml", status_code=400)
 
 
+def _uppercase_params(request: Request) -> dict[str, str]:
+    """Return query parameters with keys uppercased for case-insensitive WMS/WMTS dispatch."""
+    return {k.upper(): v for k, v in request.query_params.items()}
+
+
 @app.get("/{duration_str}/wmts/")
 @app.get("/{duration_str}/wmts")
 async def wmts_endpoint(duration_str: str, request: Request):
     """Dispatch WMTS requests."""
     mda = request.app.state.mda
-    params = {k.upper(): v for k, v in request.query_params.items()}
+    params = _uppercase_params(request)
     request_type = params.get("REQUEST", "GetCapabilities").upper()
     if request_type == "GETCAPABILITIES":
         online_resource = f"{config.get('base_url')}/{duration_str}/"
@@ -69,6 +76,7 @@ async def wmts_endpoint(duration_str: str, request: Request):
             interval_min=parse_interval_min(config.get("granule_interval")),
             force_webp=bool(config.get("force_webp")),
             wmts_max_zoom=int(config.get("wmts_max_zoom")),
+            duration_str=duration_str,
         )
 
     if request_type and request_type.upper() != "GETTILE":
@@ -76,12 +84,12 @@ async def wmts_endpoint(duration_str: str, request: Request):
 
     layer = params.get("LAYER")
     tms_id = params.get("TILEMATRIXSET")
-    z = int(params.get("TILEMATRIX"))
-    y = int(params.get("TILEROW"))
-    x = int(params.get("TILECOL"))
-
-    if None in (layer, tms_id, z, y, x):
+    z_str = params.get("TILEMATRIX")
+    y_str = params.get("TILEROW")
+    x_str = params.get("TILECOL")
+    if None in (layer, tms_id, z_str, y_str, x_str):
         raise HTTPException(status_code=400, detail="Missing required WMTS KVP parameters.")
+    z, y, x = int(z_str), int(y_str), int(x_str)
 
     return await generate_tile(
         mda,
@@ -106,7 +114,7 @@ async def wmts_tile_endpoint(
 ):
     """Dispatch WMTS GetTile requests."""
     mda = request.app.state.mda
-    params = {k.upper(): v for k, v in request.query_params.items()}
+    params = _uppercase_params(request)
     return await generate_tile(
         mda,
         layer=layer,
@@ -128,7 +136,7 @@ async def wmts_tile_endpoint(
 @app.get("/{duration_str}")
 async def wms_endpoint(duration_str: str, request: Request):
     """Dispatch WMS requests."""
-    params = {k.upper(): v for k, v in request.query_params.items()}
+    params = _uppercase_params(request)
 
     version = params.get("VERSION")
     if version and version != "1.3.0":
@@ -149,6 +157,7 @@ async def wms_endpoint(duration_str: str, request: Request):
                 supported_crs=config.get("supported_crs"),
                 interval_min=interval_min,
                 force_webp=force_webp,
+                duration_str=duration_str,
             )
         case "GETMAP":
             from pyproj.exceptions import CRSError  # noqa: PLC0415

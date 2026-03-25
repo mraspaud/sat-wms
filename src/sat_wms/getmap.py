@@ -2,10 +2,6 @@
 import asyncio
 import dataclasses
 import functools
-import os as _os
-import struct
-import zlib
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -14,28 +10,9 @@ import pyproj
 from fastapi import Response
 from rasterio.crs import CRS
 from rio_tiler.io import COGReader
-from rio_tiler.models import ImageData
 
 from sat_wms.config import config
-from sat_wms.time_utils import floor_dt
-
-# GDAL performance hints for Cloud Optimized GeoTIFFs.
-_os.environ.setdefault("GDAL_CACHEMAX", "512")                  # tile cache (MB)
-_os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")  # skip dir listing on open
-_os.environ.setdefault("VSI_CACHE", "TRUE")                     # cache range-request headers
-_os.environ.setdefault("VSI_CACHE_SIZE", "25000000")            # 25 MB VSI header cache
-
-# I/O-bound COG reads benefit from more threads than CPU cores.
-_READ_POOL = ThreadPoolExecutor(max_workers=_os.cpu_count() * 4)
-
-# Limit concurrent renders per worker to prevent _READ_POOL starvation when
-# many requests arrive simultaneously. Sized to cpu_count so each render
-# gets roughly one CPU worth of file-read threads.
-_RENDER_SEM = asyncio.Semaphore(_os.cpu_count())
-
-
-_FORMATS = {"image/png": "PNG", "image/webp": "WEBP"}
-_MEDIA_TYPES = {"PNG": "image/png", "WEBP": "image/webp"}
+from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, TILE_FORMATS, cache_control, empty_image, merge_images
 
 
 @dataclass
@@ -78,57 +55,17 @@ def _parse_params(params: dict) -> WmsParams:
         if time_str
         else datetime.now(timezone.utc)
     )
-    fmt = _FORMATS.get(params.get("FORMAT", "").lower(), "PNG")
+    fmt = TILE_FORMATS.get(params.get("FORMAT", "").lower(), "PNG")
     return WmsParams(layer_name=layer_name, bbox=bbox, crs=crs, srid=srid,
                      width=width, height=height, time=time, fmt=fmt)
 
 
 @functools.lru_cache(maxsize=config.get("tile_cache_entries"))
-def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int) -> ImageData:
+def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
     """Read a single GeoTIFF into an ImageData (runs in a thread)."""
     dst = CRS.from_authority(*dst_crs.split(":"))
     with COGReader(fp) as cog:
         return cog.part(bbox, bounds_crs=dst, dst_crs=dst, width=width, height=height)
-
-
-@functools.lru_cache(maxsize=32)
-def _empty_png(width: int, height: int) -> bytes:
-    """Return a fully transparent RGBA PNG using stdlib only (cached per size)."""
-    def chunk(tag: bytes, data: bytes) -> bytes:
-        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-
-    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
-    raw = b"\x00" * (height * (width * 4 + 1))  # filter-none byte + RGBA zeros per row
-    idat = chunk(b"IDAT", zlib.compress(raw, 1))
-    iend = chunk(b"IEND", b"")
-    return b"\x89PNG\r\n\x1a\n" + ihdr + idat + iend
-
-
-@functools.lru_cache(maxsize=32)
-def _empty_image(width: int, height: int, img_format: str) -> bytes:
-    """Return a fully transparent image in the requested format (cached per size+format)."""
-    if img_format == "PNG":
-        return _empty_png(width, height)
-    mask = np.ones((1, height, width), dtype=bool)
-    data = np.ma.MaskedArray(np.zeros((1, height, width), dtype=np.uint8), mask)
-    return ImageData(data).render(img_format=img_format)
-
-
-def _cache_control(latest, end_dt: datetime, interval_min: int) -> str:
-    """Return an appropriate Cache-Control header value for a GetMap response."""
-    is_latest = latest is not None and floor_dt(latest, interval_min) == floor_dt(end_dt, interval_min)
-    return "public, max-age=60" if is_latest else "public, max-age=3600"
-
-
-def _merge(base: ImageData, overlay: ImageData) -> ImageData:
-    """Paint overlay pixels onto the transparent areas of base."""
-    no_data = np.all(base.array.mask, axis=0, keepdims=True)
-    data = np.where(no_data, overlay.array.data, base.array.data)
-    mask = np.broadcast_to(
-        no_data & np.all(overlay.array.mask, axis=0, keepdims=True),
-        data.shape,
-    ).copy()
-    return ImageData(np.ma.MaskedArray(data, mask), bounds=base.bounds, crs=base.crs)
 
 
 async def generate_map(
@@ -142,27 +79,26 @@ async def generate_map(
     end_dt = p.time
     start_dt = end_dt - duration
 
-    # Run both queries concurrently — they are independent.
     latest, filepaths = await asyncio.gather(
         mda.get_latest_time(p.layer_name),
         mda.get_map_assets(p.layer_name, list(p.bbox), start_dt, end_dt, src_srid=p.srid),
     )
 
-    headers = {"Cache-Control": _cache_control(latest, end_dt, interval_min)}
+    headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
 
-    media_type = _MEDIA_TYPES[p.fmt]
+    media_type = MEDIA_TYPES[p.fmt]
 
     if not filepaths:
         if empty_no_content:
             return Response(status_code=204, headers=headers)
-        return Response(content=_empty_image(p.width, p.height, p.fmt), media_type=media_type,
+        return Response(content=empty_image(p.width, p.height, p.fmt), media_type=media_type,
                         headers=headers)
 
-    async with _RENDER_SEM:
+    async with RENDER_SEM:
         loop = asyncio.get_running_loop()
         # Submit all reads to the pool simultaneously so they run in parallel,
         # then await them in list order (newest file first = highest composite priority).
-        aws = [loop.run_in_executor(_READ_POOL, _read_one, fp, p.bbox, p.crs, p.width, p.height)
+        aws = [loop.run_in_executor(READ_POOL, _read_one, fp, p.bbox, p.crs, p.width, p.height)
                for fp in filepaths]
         result = None
         for aw in aws:
@@ -172,7 +108,7 @@ async def generate_map(
                 continue
             if not np.any(result.array.mask):
                 break  # canvas full; remaining reads continue in pool but we don't wait
-            result = _merge(result, img)
+            result = merge_images(result, img)
         render_kwargs = {"img_format": p.fmt} if p.fmt != "PNG" else {"img_format": "PNG", "zlevel": 1}
         image = await loop.run_in_executor(None, functools.partial(result.render, **render_kwargs))
 

@@ -50,6 +50,28 @@ async def test_wmts_capabilities_crs_uri_is_ogc_urn(local_mda):
 
 
 @pytest.mark.asyncio
+async def test_wmts_capabilities_title_comes_from_config(local_mda):
+    """WMTS capabilities title is read from the wms_title config key."""
+    import sat_wms.config as cfg
+    from sat_wms.wmts import generate_wmts_capabilities
+
+    with cfg.config.set({"wms_title": "My Sat"}):
+        resp = await generate_wmts_capabilities(local_mda)
+    assert b"My Sat" in resp.body
+
+
+@pytest.mark.asyncio
+async def test_wmts_capabilities_title_includes_duration(local_mda):
+    """WMTS capabilities title has the duration string appended."""
+    import sat_wms.config as cfg
+    from sat_wms.wmts import generate_wmts_capabilities
+
+    with cfg.config.set({"wms_title": "My Sat"}):
+        resp = await generate_wmts_capabilities(local_mda, duration_str="3h")
+    assert b"My Sat (3h)" in resp.body
+
+
+@pytest.mark.asyncio
 async def test_wmts_capabilities_contains_layer_name(local_mda):
     """Capabilities document lists at least one layer from the MDA."""
     from sat_wms.wmts import generate_wmts_capabilities

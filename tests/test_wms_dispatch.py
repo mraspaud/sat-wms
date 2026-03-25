@@ -70,3 +70,15 @@ def test_invalid_crs_returns_exception_xml(client):
     })
     assert res.status_code == 400
     assert 'code="InvalidCRS"' in res.text
+
+
+def test_getmap_missing_layers_returns_error(client):
+    """GetMap without LAYERS returns a 400 ServiceException."""
+    res = client.get("/30m/", params={
+        "REQUEST": "GetMap",
+        "CRS": "EPSG:3575",
+        "BBOX": "-1320000,-2781000,569250,245250",
+        "WIDTH": "256",
+        "HEIGHT": "256",
+    })
+    assert res.status_code == 400

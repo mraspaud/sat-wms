@@ -16,7 +16,6 @@ _PREBUILT: dict[int, str] = {
     4326: "WGS1984Quad",
 }
 
-# Custom TileMatrixSet for EPSG:3575 (North Pole LAEA Europe).
 # Extent covers the full valid domain of the projection (≈ ±5 400 000 m from pole).
 # z7 ≈ 330 m/px matches VIIRS 375 m resolution; z9 is the practical ceiling.
 _CUSTOM: dict[int, morecantile.TileMatrixSet] = {

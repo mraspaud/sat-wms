@@ -22,6 +22,28 @@ async def test_capabilities_dimension_uses_configured_interval(local_mda):
 
 
 @pytest.mark.asyncio
+async def test_capabilities_title_comes_from_config(local_mda):
+    """The WMS capabilities title is read from the wms_title config key."""
+    import sat_wms.config as cfg
+    from sat_wms.capabilities import generate_capabilities
+
+    with cfg.config.set({"wms_title": "My Sat"}):
+        res = await generate_capabilities(local_mda)
+    assert "My Sat" in res.body.decode()
+
+
+@pytest.mark.asyncio
+async def test_capabilities_title_includes_duration(local_mda):
+    """The WMS capabilities title has the duration string appended."""
+    import sat_wms.config as cfg
+    from sat_wms.capabilities import generate_capabilities
+
+    with cfg.config.set({"wms_title": "My Sat"}):
+        res = await generate_capabilities(local_mda, duration_str="2h")
+    assert "My Sat (2h)" in res.body.decode()
+
+
+@pytest.mark.asyncio
 async def test_capabilities_default_is_raw_latest_time(local_mda):
     """The Dimension default is the raw latest granule time (not ceiled) for cache busting."""
     from sat_wms.capabilities import generate_capabilities

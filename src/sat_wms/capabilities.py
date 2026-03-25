@@ -1,6 +1,7 @@
 """Get capabilities."""
 from fastapi.templating import Jinja2Templates
 
+from sat_wms.config import config
 from sat_wms.time_utils import ceil_dt, floor_dt
 
 templates = Jinja2Templates(directory="templates")
@@ -13,9 +14,12 @@ def _parse_postgis_box(bbox_str: str) -> tuple[str, str, str, str]:
 
 
 async def generate_capabilities(
-    mda, request=None, online_resource=None, supported_crs=None, interval_min: int = 10, force_webp: bool = False
+    mda, request=None, online_resource=None, supported_crs=None, interval_min: int = 10,
+    force_webp: bool = False, duration_str: str | None = None,
 ):
     """Generate the GetCapabilities document."""
+    base_title = config.get("wms_title")
+    title = f"{base_title} ({duration_str})" if duration_str else base_title
     raw_layers = await mda.get_layers()
     processed_layers = []
     for layer in raw_layers:
@@ -32,6 +36,7 @@ async def generate_capabilities(
         request,
         "capabilities.xml.j2",
         context={
+            "title": title,
             "layers": processed_layers,
             "online_resource": online_resource,
             "supported_crs": supported_crs or ["EPSG:3575", "EPSG:3857"],

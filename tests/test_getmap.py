@@ -31,44 +31,6 @@ async def test_generate_map_live(local_mda):
     assert res.body[:4] == b"\x89PNG"
 
 
-def test_parse_params_default_format_is_png():
-    """FORMAT defaults to PNG when the parameter is absent."""
-    from sat_wms.getmap import _parse_params
-
-    assert _parse_params(VALID_PARAMS).fmt == "PNG"
-
-
-def test_parse_params_webp_format():
-    """FORMAT=image/webp is parsed to the WEBP render format."""
-    from sat_wms.getmap import _parse_params
-
-    assert _parse_params({**VALID_PARAMS, "FORMAT": "image/webp"}).fmt == "WEBP"
-
-
-def test_parse_params_layer_name():
-    """_parse_params extracts the layer name from LAYERS."""
-    from sat_wms.getmap import _parse_params
-
-    result = _parse_params(VALID_PARAMS)
-    assert result.layer_name == "true_color_day"
-
-
-def test_parse_params_srid():
-    """_parse_params parses the SRID from the CRS string."""
-    from sat_wms.getmap import _parse_params
-
-    assert _parse_params(VALID_PARAMS).srid == 3575
-
-
-def test_parse_params_missing_layers_raises():
-    """_parse_params raises KeyError when LAYERS is absent."""
-    from sat_wms.getmap import _parse_params
-
-    params = {k: v for k, v in VALID_PARAMS.items() if k != "LAYERS"}
-    with pytest.raises(KeyError):
-        _parse_params(params)
-
-
 @pytest.mark.asyncio
 async def test_generate_map_webp_returns_webp_content_type(synth_mda):
     """FORMAT=image/webp produces a response with media_type image/webp."""
@@ -194,52 +156,6 @@ async def test_generate_map_time_window(local_mda):
     assert start.minute == 5
 
 
-def test_parse_params_epsg4326_swaps_axes():
-    """EPSG:4326 BBOX (minlat,minlon,maxlat,maxlon) is swapped to (minlon,minlat,...)."""
-    from sat_wms.getmap import _parse_params
-
-    params = {**VALID_PARAMS, "CRS": "EPSG:4326", "BBOX": "60.0,-30.0,80.0,40.0"}
-    result = _parse_params(params)
-    assert result.bbox == (-30.0, 60.0, 40.0, 80.0)
-
-
-def test_parse_params_epsg3575_no_axis_swap():
-    """EPSG:3575 BBOX is not swapped (easting-first CRS)."""
-    from sat_wms.getmap import _parse_params
-
-    result = _parse_params(VALID_PARAMS)
-    assert result.bbox == (-1320000.0, -2781000.0, 569250.0, 245250.0)
-
-
-def test_is_geographic_caches_pyproj_lookup():
-    """_is_geographic caches pyproj lookups so the EPSG database is hit only once per CRS."""
-    from sat_wms.getmap import _is_geographic
-
-    _is_geographic.cache_clear()
-    _is_geographic("EPSG:4326")
-    _is_geographic("EPSG:4326")
-    assert _is_geographic.cache_info().hits == 1
-
-
-def test_empty_png_caches_result():
-    """_empty_png returns the same bytes object for identical dimensions (LRU cache hit)."""
-    from sat_wms.getmap import _empty_png
-
-    result1 = _empty_png(256, 256)
-    result2 = _empty_png(256, 256)
-    assert result1 is result2
-
-
-def test_read_one_caches_result(test_tif):
-    """_read_one returns the same ImageData object for identical arguments (LRU cache hit)."""
-    from sat_wms.getmap import _read_one
-
-    bbox = (-1320000.0, -2781000.0, 569250.0, 245250.0)
-    result1 = _read_one(test_tif, bbox, "EPSG:3575", 10, 10)
-    result2 = _read_one(test_tif, bbox, "EPSG:3575", 10, 10)
-    assert result1 is result2
-
-
 @pytest.mark.asyncio
 async def test_generate_map_epsg3857(synth_mda):
     """generate_map accepts an EPSG:3857 BBOX and returns a PNG."""
@@ -256,3 +172,19 @@ async def test_generate_map_epsg3857(synth_mda):
     res = await generate_map(synth_mda, params, timedelta(hours=1))
     assert res.status_code == 200
     assert res.body[:4] == b"\x89PNG"
+
+
+@pytest.mark.asyncio
+async def test_generate_map_epsg4326_interprets_bbox_as_lat_lon(synth_mda):
+    """WMS 1.3.0: EPSG:4326 BBOX is (minlat,minlon,maxlat,maxlon); generate_map must accept it."""
+    from sat_wms.getmap import generate_map
+
+    params = {
+        "LAYERS": "true_color_day",
+        "CRS": "EPSG:4326",
+        "BBOX": "-90.0,-180.0,90.0,180.0",
+        "WIDTH": "256",
+        "HEIGHT": "256",
+    }
+    res = await generate_map(synth_mda, params, timedelta(hours=1))
+    assert res.status_code == 200
