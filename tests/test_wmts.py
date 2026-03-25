@@ -38,6 +38,18 @@ async def test_wmts_capabilities_contains_tilematrixset_identifier(local_mda):
 
 
 @pytest.mark.asyncio
+async def test_wmts_capabilities_crs_uri_is_ogc_urn(local_mda):
+    """SupportedCRS uses the OGC URN format that OpenLayers can resolve."""
+    from sat_wms.wmts import generate_wmts_capabilities
+
+    resp = await generate_wmts_capabilities(local_mda, supported_crs=["EPSG:3857", "EPSG:3575"])
+    assert b"urn:ogc:def:crs:EPSG::3857" in resp.body
+    assert b"urn:ogc:def:crs:EPSG::3575" in resp.body
+    # Must NOT contain the HTTP URI form that OL can't resolve
+    assert b"http://www.opengis.net/def/crs" not in resp.body
+
+
+@pytest.mark.asyncio
 async def test_wmts_capabilities_contains_layer_name(local_mda):
     """Capabilities document lists at least one layer from the MDA."""
     from sat_wms.wmts import generate_wmts_capabilities

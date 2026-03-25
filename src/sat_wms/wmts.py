@@ -43,7 +43,8 @@ def _read_tile(fp: str, tms_id: str, x: int, y: int, z: int):
 
 def _tms_entry(tms: morecantile.TileMatrixSet, max_zoom: int) -> dict:
     """Serialise a TileMatrixSet into a template-friendly dict."""
-    crs_uri = tms.crs.root  # e.g. "http://www.opengis.net/def/crs/EPSG/0/3857"
+    # OGC URN format: OpenLayers resolves this via ol/proj; the HTTP URI form is not recognised.
+    crs_uri = f"urn:ogc:def:crs:EPSG::{tms.crs.to_epsg()}"
     matrices = []
     for z in range(tms.minzoom, min(tms.maxzoom, max_zoom) + 1):
         m = tms.matrix(z)
