@@ -15,7 +15,8 @@ from rasterio.crs import CRS
 from rio_tiler.io import COGReader
 from rio_tiler.models import ImageData
 
-from sat_wms.time_utils import ceil_dt, floor_dt
+from sat_wms.config import config
+from sat_wms.time_utils import floor_dt
 
 # GDAL performance hints for Cloud Optimized GeoTIFFs.
 _os.environ.setdefault("GDAL_CACHEMAX", "512")                  # tile cache (MB)
@@ -68,7 +69,7 @@ def _parse_params(params: dict) -> WmsParams:
                      width=width, height=height, time=time)
 
 
-@functools.lru_cache(maxsize=128)
+@functools.lru_cache(maxsize=config.get("tile_cache_entries"))
 def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int) -> ImageData:
     """Read a single GeoTIFF into an ImageData (runs in a thread)."""
     dst = CRS.from_authority(*dst_crs.split(":"))
@@ -120,14 +121,13 @@ def _empty_png(width, height):
 async def generate_map(mda, params: dict, duration: timedelta) -> Response:
     """Handle a WMS GetMap request."""
     p = _parse_params(params)
-    end_dt = floor_dt(p.time)
+    end_dt = p.time
     start_dt = end_dt - duration
 
-    # Short TTL if this is the latest available timestep (data may still be arriving).
-    # Compare end_dt against ceil of the actual latest granule time — not wall clock,
-    # since data can lag real time by 20+ minutes.
+    # Short TTL if the requested time falls in the same 10-minute bucket as the
+    # latest granule — new data may still be arriving for this window.
     latest = await mda.get_latest_time(p.layer_name)
-    is_latest = latest is not None and ceil_dt(latest) == end_dt
+    is_latest = latest is not None and floor_dt(latest) == floor_dt(end_dt)
     cache_control = "public, max-age=60" if is_latest else "public, max-age=3600"
     headers = {"Cache-Control": cache_control}
 

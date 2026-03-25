@@ -1,5 +1,5 @@
 """Tests for GetMap."""
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -83,6 +83,25 @@ async def test_generate_map_empty_result_is_transparent_png(local_mda):
     res = await generate_map(local_mda, params, timedelta(hours=1))
     assert res.status_code == 200
     assert res.body[:4] == b"\x89PNG"
+
+
+@pytest.mark.asyncio
+async def test_latest_granule_gets_short_cache_ttl():
+    """When TIME equals the latest granule time, Cache-Control is max-age=60."""
+    from sat_wms.getmap import generate_map
+
+    latest_time = datetime(2026, 3, 24, 5, 4, tzinfo=timezone.utc)
+
+    class LatestMDA:
+        async def get_latest_time(self, layer_name):
+            return latest_time
+
+        async def get_map_assets(self, *args, **kwargs):
+            return []
+
+    params = {**VALID_PARAMS, "TIME": "2026-03-24T05:04:00Z"}
+    res = await generate_map(LatestMDA(), params, timedelta(minutes=30))
+    assert res.headers["cache-control"] == "public, max-age=60"
 
 
 @pytest.mark.asyncio
