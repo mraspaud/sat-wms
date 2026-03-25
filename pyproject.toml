@@ -22,6 +22,10 @@ dev = [
     "rasterio>=1.5.0",
     "shapely>=2.1.2",
 ]
+scripts = [
+    "trollsift>=0.5",
+    "rasterio>=1.5.0",
+]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
@@ -40,7 +44,7 @@ source = "vcs"
 version-file = "src/sat_wms/version.py"
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = [".", "scripts"]
 
 [tool.ruff]
 line-length = 120

@@ -42,6 +42,6 @@ def synth_mda(test_tif):
             return None
 
         async def get_map_assets(self, *args, **kwargs):
-            return [self.path]
+            return [{"filename": self.path, "bbox": (-1320000.0, -2781000.0, 569250.0, 245250.0), "bbox_srid": 3575}]
 
     return SyntheticMDA(test_tif)

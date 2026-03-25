@@ -11,9 +11,15 @@ from fastapi.templating import Jinja2Templates
 from rio_tiler.errors import TileOutsideBounds
 
 from sat_wms.config import config
-from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, cache_control, empty_image, merge_images
+from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, cache_control, composite_images, empty_image
 from sat_wms.time_utils import ceil_dt, floor_dt
 from sat_wms.tms_registry import all_tms, build_registry, get_by_name
+
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from rio_tiler.models import ImageData
+
+_BATCH_SIZE = 4
 
 _templates = Jinja2Templates(directory="templates")
 
@@ -116,6 +122,28 @@ async def generate_wmts_capabilities(
     )
 
 
+async def _composite_tiles(filepaths: list[str], tms_id: str, x: int, y: int, z: int) -> "ImageData | None":
+    """Read and composite tiles from filepaths, returning None if all are out-of-bounds."""
+    loop = asyncio.get_running_loop()
+    images = []
+    gaps = None
+
+    for start in range(0, len(filepaths), _BATCH_SIZE):
+        batch = filepaths[start:start + _BATCH_SIZE]
+        aws = [loop.run_in_executor(READ_POOL, _read_tile, fp, tms_id, x, y, z) for fp in batch]
+        for aw in aws:
+            img = await aw
+            images.append(img)
+            if img is not None:
+                no_data = np.all(img.array.mask, axis=0)
+                gaps = no_data if gaps is None else (gaps & no_data)
+
+        if gaps is not None and not np.any(gaps):
+            break
+
+    return composite_images(images)
+
+
 async def generate_tile(
     mda,
     layer: str,
@@ -157,36 +185,30 @@ async def generate_tile(
     bbox_list = [bounds.left, bounds.bottom, bounds.right, bounds.top]
     src_srid = tms.crs.to_epsg()
 
-    latest, filepaths = await asyncio.gather(
+    latest, assets = await asyncio.gather(
         mda.get_latest_time(layer),
         mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
     )
 
     headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
 
-    if not filepaths:
+    if not assets:
         if empty_no_content:
             return Response(status_code=204, headers=headers)
         return Response(content=empty_image(256, 256, fmt), media_type=media_type, headers=headers)
 
+    filepaths = [a["filename"] for a in assets]
+
     async with RENDER_SEM:
-        loop = asyncio.get_running_loop()
-        aws = [
-            loop.run_in_executor(READ_POOL, _read_tile, fp, tms_id, x, y, z)
-            for fp in filepaths
-        ]
-        result = None
-        for aw in aws:
-            img = await aw
-            if result is None:
-                result = img
-                continue
-            if not np.any(result.array.mask):
-                break
-            result = merge_images(result, img)
+        result = await _composite_tiles(filepaths, tms_id, x, y, z)
+
+        if result is None:
+            if empty_no_content:
+                return Response(status_code=204, headers=headers)
+            return Response(content=empty_image(256, 256, fmt), media_type=media_type, headers=headers)
 
         render_kwargs = {"img_format": fmt} if fmt != "PNG" else {"img_format": "PNG", "zlevel": 1}
-        image = await loop.run_in_executor(
+        image = await asyncio.get_running_loop().run_in_executor(
             None, functools.partial(result.render, **render_kwargs)
         )
 

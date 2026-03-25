@@ -40,7 +40,36 @@ CREATE TABLE public.products_viirs (
 
 ## Running
 
-### Development
+### Without a database — CSV mode
+
+The app can run entirely without PostGIS by pointing it at a CSV catalogue file. This is useful for local development or when data lives on a shared filesystem.
+
+**Step 1 — build the catalogue.** Use `scripts/make_csv.py` with a [trollsift](https://trollsift.readthedocs.io/) filename pattern that extracts `start_time` and `product_name` from your GeoTIFF filenames:
+
+```bash
+uv run --group scripts python scripts/make_csv.py \
+  '{start_time:%Y%m%d_%H%M}_{satellite}_{scene}_{srid}_{resolution}_{product_name}.tif' \
+  /data/viirs/*.tif \
+  --output catalogue.csv
+```
+
+The script reads the CRS and bounding box directly from each file, so no manual metadata is needed.
+
+```
+# Custom key names if your pattern uses different names
+uv run --group scripts python scripts/make_csv.py \
+  '{time:%Y%m%d_%H%M}_{name}.tif' /data/*.tif \
+  --time-key time --product-key name \
+  --output catalogue.csv
+```
+
+**Step 2 — start the server:**
+
+```bash
+SAT_WMS_DATABASE_URL=catalogue.csv uv run fastapi dev main.py
+```
+
+### Development (PostGIS)
 
 Hot-reloads on source changes; logs requests to the console.
 

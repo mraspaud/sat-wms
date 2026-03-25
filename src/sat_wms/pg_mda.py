@@ -2,6 +2,12 @@
 from psycopg.rows import dict_row
 
 
+def _parse_box(box_str: str) -> tuple[float, float, float, float]:
+    """Parse a PostGIS BOX string into (minx, miny, maxx, maxy)."""
+    coords = box_str.replace("BOX(", "").replace(")", "").replace(",", " ").split()
+    return tuple(float(c) for c in coords)
+
+
 class PooledMetadataRepository:
     """PostGIS-backed repository that borrows connections from a shared pool."""
 
@@ -38,7 +44,7 @@ class PooledMetadataRepository:
                 return row["t"] if row else None
 
     async def get_map_assets(self, layer_name, bbox_list, start_dt, end_dt, src_srid=3575):
-        """Return filenames of granules intersecting the bbox within the time window."""
+        """Return assets (filename + bbox) of granules intersecting the bbox within the time window."""
         minx, miny, maxx, maxy = bbox_list
         # Segmentize the bbox before reprojecting to EPSG:3575 so that curved edges
         # (e.g. latitude lines in polar projections) are faithfully represented.
@@ -51,7 +57,10 @@ class PooledMetadataRepository:
             conn.row_factory = dict_row
             async with conn.cursor() as cur:
                 await cur.execute(f"""
-                    SELECT filename FROM public.products_viirs
+                    SELECT filename,
+                           ST_Extent(ST_Transform(geom, %(src_srid)s))::text AS granule_bbox,
+                           %(src_srid)s AS bbox_srid
+                    FROM public.products_viirs
                     WHERE product_name = %(layer_name)s
                       AND time >= %(start_dt)s
                       AND time <= %(end_dt)s
@@ -59,6 +68,7 @@ class PooledMetadataRepository:
                             geom,
                             ST_Transform({envelope_sql}, 3575)
                           )
+                    GROUP BY filename, time
                     ORDER BY time DESC;
                 """, {
                     "layer_name": layer_name,
@@ -68,4 +78,8 @@ class PooledMetadataRepository:
                     "srid": src_srid,
                 })
                 rows = await cur.fetchall()
-                return [row["filename"] for row in rows]
+                return [
+                    {"filename": row["filename"], "bbox": _parse_box(row["granule_bbox"]),
+                     "bbox_srid": row["bbox_srid"]}
+                    for row in rows
+                ]

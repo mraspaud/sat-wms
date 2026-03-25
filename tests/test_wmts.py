@@ -132,6 +132,35 @@ async def test_generate_tile_no_assets_returns_transparent_png(local_mda):
 
 
 @pytest.mark.asyncio
+async def test_generate_tile_all_out_of_bounds_returns_transparent_png():
+    """When all file reads are out-of-bounds, a transparent PNG is returned (not a crash)."""
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+
+    class OutOfBoundsMDA:
+        async def get_latest_time(self, layer_name):
+            return None
+
+        async def get_map_assets(self, *args, **kwargs):
+            return [
+                {"filename": "nonexistent1.tif", "bbox": (0.0, 0.0, 1.0, 1.0)},
+                {"filename": "nonexistent2.tif", "bbox": (0.0, 0.0, 1.0, 1.0)},
+            ]
+
+    from unittest.mock import patch
+
+    with patch("sat_wms.wmts._read_tile", return_value=None):
+        resp = await generate_tile(
+            OutOfBoundsMDA(), **_TILE_KW, duration=timedelta(hours=1),
+            time_str="2026-03-24T06:00:00Z",
+        )
+    assert resp.status_code == 200
+    assert resp.body[:4] == b"\x89PNG"
+
+
+@pytest.mark.asyncio
 async def test_generate_tile_returns_png_for_valid_tile(synth_mda):
     """A tile request with matching assets returns a PNG image."""
     from sat_wms.wmts import generate_tile
@@ -193,7 +222,7 @@ async def test_generate_tile_cache_control_short_ttl_for_latest():
 
     resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(minutes=30),
                                 time_str="2026-03-24T05:04:00Z")
-    assert resp.headers["cache-control"] == "public, max-age=60"
+    assert resp.headers["cache-control"] == "public, max-age=60, stale-while-revalidate=60"
 
 
 # ---------------------------------------------------------------------------

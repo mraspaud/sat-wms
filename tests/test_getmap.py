@@ -130,7 +130,7 @@ async def test_latest_granule_gets_short_cache_ttl():
 
     params = {**VALID_PARAMS, "TIME": "2026-03-24T05:04:00Z"}
     res = await generate_map(LatestMDA(), params, timedelta(minutes=30))
-    assert res.headers["cache-control"] == "public, max-age=60"
+    assert res.headers["cache-control"] == "public, max-age=60, stale-while-revalidate=60"
 
 
 @pytest.mark.asyncio
@@ -188,3 +188,35 @@ async def test_generate_map_epsg4326_interprets_bbox_as_lat_lon(synth_mda):
     }
     res = await generate_map(synth_mda, params, timedelta(hours=1))
     assert res.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_many_assets_returns_valid_png():
+    """generate_map composites correctly when many assets are provided."""
+    import numpy as np
+    from rio_tiler.models import ImageData
+
+    from sat_wms.getmap import generate_map
+
+    class ManyAssetsMDA:
+        async def get_latest_time(self, _layer):
+            return None
+
+        async def get_map_assets(self, *_a, **_kw):
+            return [{"filename": f"fake_{i}.tif", "bbox": (0.0, 0.0, 1.0, 1.0), "bbox_srid": 3575} for i in range(12)]
+
+    def _fake_read(fp, bbox, crs, w, h):
+        data = np.full((3, int(h), int(w)), 128, dtype=np.uint8)
+        mask = np.zeros_like(data, dtype=bool)
+        return ImageData(np.ma.MaskedArray(data, mask))
+
+    import sat_wms.getmap as gm
+    original = gm._read_one
+    gm._read_one = _fake_read
+    try:
+        res = await generate_map(ManyAssetsMDA(), VALID_PARAMS, timedelta(hours=1))
+    finally:
+        gm._read_one = original
+
+    assert res.status_code == 200
+    assert res.body[:4] == b"\x89PNG"
