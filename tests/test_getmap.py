@@ -31,6 +31,20 @@ async def test_generate_map_live(local_mda):
     assert res.body[:4] == b"\x89PNG"
 
 
+def test_parse_params_default_format_is_png():
+    """FORMAT defaults to PNG when the parameter is absent."""
+    from sat_wms.getmap import _parse_params
+
+    assert _parse_params(VALID_PARAMS).fmt == "PNG"
+
+
+def test_parse_params_webp_format():
+    """FORMAT=image/webp is parsed to the WEBP render format."""
+    from sat_wms.getmap import _parse_params
+
+    assert _parse_params({**VALID_PARAMS, "FORMAT": "image/webp"}).fmt == "WEBP"
+
+
 def test_parse_params_layer_name():
     """_parse_params extracts the layer name from LAYERS."""
     from sat_wms.getmap import _parse_params
@@ -53,6 +67,27 @@ def test_parse_params_missing_layers_raises():
     params = {k: v for k, v in VALID_PARAMS.items() if k != "LAYERS"}
     with pytest.raises(KeyError):
         _parse_params(params)
+
+
+@pytest.mark.asyncio
+async def test_generate_map_webp_returns_webp_content_type(synth_mda):
+    """FORMAT=image/webp produces a response with media_type image/webp."""
+    from sat_wms.getmap import generate_map
+
+    params = {**VALID_PARAMS, "FORMAT": "image/webp"}
+    res = await generate_map(synth_mda, params, timedelta(hours=1))
+    assert res.media_type == "image/webp"
+
+
+@pytest.mark.asyncio
+async def test_generate_map_webp_body_starts_with_riff(synth_mda):
+    """FORMAT=image/webp response body is a valid WebP file."""
+    from sat_wms.getmap import generate_map
+
+    params = {**VALID_PARAMS, "FORMAT": "image/webp"}
+    res = await generate_map(synth_mda, params, timedelta(hours=1))
+    assert res.body[:4] == b"RIFF"
+    assert res.body[8:12] == b"WEBP"
 
 
 @pytest.mark.asyncio
@@ -83,6 +118,16 @@ async def test_generate_map_empty_result_is_transparent_png(local_mda):
     res = await generate_map(local_mda, params, timedelta(hours=1))
     assert res.status_code == 200
     assert res.body[:4] == b"\x89PNG"
+
+
+@pytest.mark.asyncio
+async def test_force_webp_overrides_png_request(synth_mda):
+    """force_webp=True returns WebP even when the client requests image/png."""
+    from sat_wms.getmap import generate_map
+
+    res = await generate_map(synth_mda, VALID_PARAMS, timedelta(hours=1), force_webp=True)
+    assert res.media_type == "image/webp"
+    assert res.body[8:12] == b"WEBP"
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,9 @@ from sat_wms.time_utils import ceil_dt, floor_dt
 templates = Jinja2Templates(directory="templates")
 
 
-async def generate_capabilities(mda, request=None, online_resource=None, supported_crs=None, interval_min: int = 10):
+async def generate_capabilities(
+    mda, request=None, online_resource=None, supported_crs=None, interval_min: int = 10, force_webp: bool = False
+):
     """Generate the GetCapabilities document."""
     raw_layers = await mda.get_layers()
     processed_layers = []
@@ -28,6 +30,7 @@ async def generate_capabilities(mda, request=None, online_resource=None, support
             "online_resource": online_resource,
             "supported_crs": supported_crs or ["EPSG:3575", "EPSG:3857"],
             "interval_iso": f"PT{interval_min}M",
+            "map_formats": ["image/webp"] if force_webp else ["image/png", "image/webp"],
         },
         media_type="text/xml",
     )

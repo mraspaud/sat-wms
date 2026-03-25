@@ -75,6 +75,7 @@ async def wms_endpoint(duration_str: str, request: Request):
     mda = request.app.state.mda
     online_resource = f"{config.get('base_url')}/{duration_str}/"
     interval_min = parse_interval_min(config.get("granule_interval"))
+    force_webp = bool(config.get("force_webp"))
 
     match params.get("REQUEST"):
         case "GetCapabilities":
@@ -84,13 +85,16 @@ async def wms_endpoint(duration_str: str, request: Request):
                 online_resource=online_resource,
                 supported_crs=config.get("supported_crs"),
                 interval_min=interval_min,
+                force_webp=force_webp,
             )
         case "GetMap":
             from pyproj.exceptions import CRSError  # noqa: PLC0415
 
             from sat_wms.getmap import generate_map  # noqa: PLC0415
             try:
-                return await generate_map(mda, params, _parse_duration(duration_str), interval_min=interval_min)
+                return await generate_map(mda, params, _parse_duration(duration_str),
+                                          interval_min=interval_min,
+                                          force_webp=force_webp)
             except CRSError as exc:
                 return _wms_exception(str(exc), code="InvalidCRS")
             except Exception as exc:

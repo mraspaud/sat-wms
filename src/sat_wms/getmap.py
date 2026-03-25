@@ -1,5 +1,6 @@
 """GetMap request handler."""
 import asyncio
+import dataclasses
 import functools
 import os as _os
 import struct
@@ -33,6 +34,10 @@ _READ_POOL = ThreadPoolExecutor(max_workers=_os.cpu_count() * 4)
 _RENDER_SEM = asyncio.Semaphore(_os.cpu_count())
 
 
+_FORMATS = {"image/png": "PNG", "image/webp": "WEBP"}
+_MEDIA_TYPES = {"PNG": "image/png", "WEBP": "image/webp"}
+
+
 @dataclass
 class WmsParams:
     """Parsed WMS GetMap parameters."""
@@ -44,6 +49,7 @@ class WmsParams:
     width: int
     height: int
     time: datetime
+    fmt: str = "PNG"
 
 
 @functools.lru_cache(maxsize=16)
@@ -72,8 +78,9 @@ def _parse_params(params: dict) -> WmsParams:
         if time_str
         else datetime.now(timezone.utc)
     )
+    fmt = _FORMATS.get(params.get("FORMAT", "").lower(), "PNG")
     return WmsParams(layer_name=layer_name, bbox=bbox, crs=crs, srid=srid,
-                     width=width, height=height, time=time)
+                     width=width, height=height, time=time, fmt=fmt)
 
 
 @functools.lru_cache(maxsize=config.get("tile_cache_entries"))
@@ -97,9 +104,23 @@ def _empty_png(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + ihdr + idat + iend
 
 
-async def generate_map(mda, params: dict, duration: timedelta, interval_min: int = 10) -> Response:
+@functools.lru_cache(maxsize=32)
+def _empty_image(width: int, height: int, img_format: str) -> bytes:
+    """Return a fully transparent image in the requested format (cached per size+format)."""
+    if img_format == "PNG":
+        return _empty_png(width, height)
+    mask = np.ones((1, height, width), dtype=bool)
+    data = np.ma.MaskedArray(np.zeros((1, height, width), dtype=np.uint8), mask)
+    return ImageData(data).render(img_format=img_format)
+
+
+async def generate_map(
+    mda, params: dict, duration: timedelta, interval_min: int = 10, force_webp: bool = False
+) -> Response:
     """Handle a WMS GetMap request."""
     p = _parse_params(params)
+    if force_webp:
+        p = dataclasses.replace(p, fmt="WEBP")
     end_dt = p.time
     start_dt = end_dt - duration
 
@@ -115,8 +136,10 @@ async def generate_map(mda, params: dict, duration: timedelta, interval_min: int
     cache_control = "public, max-age=60" if is_latest else "public, max-age=3600"
     headers = {"Cache-Control": cache_control}
 
+    media_type = _MEDIA_TYPES[p.fmt]
+
     if not filepaths:
-        return Response(content=_empty_png(p.width, p.height), media_type="image/png",
+        return Response(content=_empty_image(p.width, p.height, p.fmt), media_type=media_type,
                         headers=headers)
 
     async with _RENDER_SEM:
@@ -140,6 +163,7 @@ async def generate_map(mda, params: dict, duration: timedelta, interval_min: int
                 data.shape,
             ).copy()
             result = ImageData(np.ma.MaskedArray(data, mask), bounds=result.bounds, crs=result.crs)
-        png = await loop.run_in_executor(None, functools.partial(result.render, img_format="PNG", zlevel=1))
+        render_kwargs = {"img_format": p.fmt} if p.fmt != "PNG" else {"img_format": "PNG", "zlevel": 1}
+        image = await loop.run_in_executor(None, functools.partial(result.render, **render_kwargs))
 
-    return Response(content=png, media_type="image/png", headers=headers)
+    return Response(content=image, media_type=media_type, headers=headers)

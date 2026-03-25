@@ -14,7 +14,9 @@
                 <DCPType><HTTP><Get><OnlineResource xlink:href="{{ online_resource }}" /></Get></HTTP></DCPType>
             </GetCapabilities>
             <GetMap>
-                <Format>image/png</Format>
+                {%- for fmt in map_formats %}
+                <Format>{{ fmt }}</Format>
+                {%- endfor %}
                 <DCPType><HTTP><Get><OnlineResource xlink:href="{{ online_resource }}" /></Get></HTTP></DCPType>
             </GetMap>
         </Request>

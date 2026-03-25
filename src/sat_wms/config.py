@@ -7,6 +7,7 @@ config = Config("sat_wms", defaults=[{
     "wms_title": "Nordsat VIIRS WMS",
     "supported_crs": ["EPSG:3575", "EPSG:3857", "EPSG:5041", "EPSG:4326"],
     "granule_interval": "5m",
+    "force_webp": False,
     # Number of (filepath, bbox, crs, width, height) combinations to keep in the
     # in-process tile read cache. Each entry holds a NumPy masked array; at
     # 512×512 RGBA that's roughly 1 MB per entry, so 1024 ≈ 1 GB.
