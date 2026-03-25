@@ -3,7 +3,7 @@ import contextlib
 import logging
 import time
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 
@@ -65,6 +65,55 @@ async def wmts_capabilities_endpoint(duration_str: str, request: Request):
         supported_crs=config.get("supported_crs"),
         interval_min=parse_interval_min(config.get("granule_interval")),
         force_webp=bool(config.get("force_webp")),
+        wmts_max_zoom=int(config.get("wmts_max_zoom")),
+    )
+
+
+@app.get("/{duration_str}/wmts/")
+async def wmts_kvp_endpoint(
+    duration_str: str,
+    request: Request,
+    # Map the OGC KVP names to local variables
+    layer: str = Query(None, alias="layer"),
+    tms_id: str = Query(None, alias="tilematrixset"),
+    z: int = Query(None, alias="tilematrix"),
+    y: int = Query(None, alias="tilerow"),
+    x: int = Query(None, alias="tilecol"),
+    request_type: str = Query(None, alias="request"),
+):
+    """Handle WMTS KVP (Key-Value Pair) requests.
+
+    Translates 'TileMatrix' and friends into z, y, x.
+    """
+    # 1. Check if it's actually a GetTile request
+    if request_type and request_type.upper() != "GETTILE":
+        # If it's GetCapabilities, you'd handle that here or elsewhere
+        raise HTTPException(status_code=400, detail="Only GetTile is supported at this KVP endpoint.")
+
+    # 2. Extract query params once for the rest of the logic
+    # OGC specifies case-insensitivity, so we normalize keys to uppercase
+    params = {k.upper(): v for k, v in request.query_params.items()}
+
+    # 3. Validation: KVP clients are notorious for missing params
+    if None in (layer, tms_id, z, y, x):
+        raise HTTPException(status_code=400, detail="Missing required WMTS KVP parameters.")
+
+    mda = request.app.state.mda
+
+    # 4. Delegate to your existing worker function
+    return await generate_tile(
+        mda,
+        layer=layer,
+        tms_id=tms_id,
+        z=z, y=y, x=x,
+        duration=parse_duration(duration_str),
+        time_str=params.get("TIME"),
+        fmt={"image/png": "PNG", "image/webp": "WEBP"}.get(
+            (params.get("FORMAT") or "").lower(), "PNG"
+        ),
+        interval_min=parse_interval_min(config.get("granule_interval")),
+        force_webp=bool(config.get("force_webp")),
+        empty_no_content=bool(config.get("empty_no_content")),
         wmts_max_zoom=int(config.get("wmts_max_zoom")),
     )
 
