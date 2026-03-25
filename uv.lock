@@ -1016,6 +1016,7 @@ dependencies = [
     { name = "donfig" },
     { name = "fastapi", extra = ["standard"] },
     { name = "jinja2" },
+    { name = "morecantile" },
     { name = "psycopg", extra = ["pool"] },
     { name = "rio-tiler" },
 ]
@@ -1034,6 +1035,7 @@ requires-dist = [
     { name = "donfig", specifier = ">=0.8.1.post1" },
     { name = "fastapi", extras = ["standard"] },
     { name = "jinja2" },
+    { name = "morecantile", specifier = ">=7.0" },
     { name = "psycopg", extras = ["pool"] },
     { name = "rio-tiler", specifier = ">=9.0.4" },
 ]

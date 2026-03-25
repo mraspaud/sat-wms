@@ -10,6 +10,7 @@ dependencies = [
     "jinja2",
     "donfig>=0.8.1.post1",
     "rio-tiler>=9.0.4",
+    "morecantile>=7.0",
 ]
 dynamic = ["version"]
 

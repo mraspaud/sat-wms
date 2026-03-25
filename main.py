@@ -11,6 +11,7 @@ from sat_wms.capabilities import generate_capabilities
 from sat_wms.config import config
 from sat_wms.local_mda import make_mda
 from sat_wms.time_utils import parse_duration, parse_interval_min
+from sat_wms.wmts import generate_tile, generate_wmts_capabilities
 
 logger = logging.getLogger("sat_wms.access")
 _templates = Jinja2Templates(directory="templates")
@@ -49,6 +50,47 @@ def _wms_exception(msg: str, code: str | None = None) -> Response:
     """Return a WMS 1.3.0 ServiceException response."""
     content = _templates.get_template("service_exception.xml.j2").render(msg=msg, code=code)
     return Response(content=content, media_type="text/xml", status_code=400)
+
+
+@app.get("/{duration_str}/wmts/")
+@app.get("/{duration_str}/wmts")
+async def wmts_capabilities_endpoint(duration_str: str, request: Request):
+    """Dispatch WMTS GetCapabilities requests."""
+    mda = request.app.state.mda
+    online_resource = f"{config.get('base_url')}/{duration_str}/"
+    return await generate_wmts_capabilities(
+        mda,
+        request=request,
+        online_resource=online_resource,
+        supported_crs=config.get("supported_crs"),
+        interval_min=parse_interval_min(config.get("granule_interval")),
+        force_webp=bool(config.get("force_webp")),
+        wmts_max_zoom=int(config.get("wmts_max_zoom")),
+    )
+
+
+@app.get("/{duration_str}/wmts/{layer}/{tms_id}/{z}/{y}/{x}")
+async def wmts_tile_endpoint(
+    duration_str: str, layer: str, tms_id: str, z: int, y: int, x: int, request: Request,
+):
+    """Dispatch WMTS GetTile requests."""
+    mda = request.app.state.mda
+    params = request.query_params
+    return await generate_tile(
+        mda,
+        layer=layer,
+        tms_id=tms_id,
+        z=z, y=y, x=x,
+        duration=parse_duration(duration_str),
+        time_str=params.get("TIME"),
+        fmt={"image/png": "PNG", "image/webp": "WEBP"}.get(
+            (params.get("FORMAT") or "").lower(), "PNG"
+        ),
+        interval_min=parse_interval_min(config.get("granule_interval")),
+        force_webp=bool(config.get("force_webp")),
+        empty_no_content=bool(config.get("empty_no_content")),
+        wmts_max_zoom=int(config.get("wmts_max_zoom")),
+    )
 
 
 @app.get("/{duration_str}/")

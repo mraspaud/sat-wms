@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Capabilities version="1.0.0"
+    xmlns="http://www.opengis.net/wmts/1.0"
+    xmlns:ows="http://www.opengis.net/ows/1.1"
+    xmlns:xlink="http://www.w3.org/1999/xlink">
+  <ows:ServiceIdentification>
+    <ows:Title>{{ title }}</ows:Title>
+    <ows:ServiceType>OGC WMTS</ows:ServiceType>
+    <ows:ServiceTypeVersion>1.0.0</ows:ServiceTypeVersion>
+  </ows:ServiceIdentification>
+  <ows:OperationsMetadata>
+    <ows:Operation name="GetCapabilities">
+      <ows:DCP><ows:HTTP><ows:Get xlink:href="{{ online_resource }}wmts/"/></ows:HTTP></ows:DCP>
+    </ows:Operation>
+    <ows:Operation name="GetTile">
+      <ows:DCP><ows:HTTP><ows:Get xlink:href="{{ online_resource }}wmts/"/></ows:HTTP></ows:DCP>
+    </ows:Operation>
+  </ows:OperationsMetadata>
+  <Contents>
+    {%- for layer in layers %}
+    <Layer>
+      <ows:Title>{{ layer.layer_name }}</ows:Title>
+      <ows:Identifier>{{ layer.layer_name }}</ows:Identifier>
+      <ows:WGS84BoundingBox>
+        <ows:LowerCorner>{{ layer.lon_min }} {{ layer.lat_min }}</ows:LowerCorner>
+        <ows:UpperCorner>{{ layer.lon_max }} {{ layer.lat_max }}</ows:UpperCorner>
+      </ows:WGS84BoundingBox>
+      <Style isDefault="true"><ows:Identifier>default</ows:Identifier></Style>
+      {%- for fmt in tile_formats %}
+      <Format>{{ fmt }}</Format>
+      {%- endfor %}
+      <Dimension>
+        <ows:Identifier>time</ows:Identifier>
+        <Default>{{ layer.end_str }}</Default>
+        <Value>{{ layer.start_str }}/{{ layer.end_range_str }}/{{ interval_iso }}</Value>
+      </Dimension>
+      {%- for tms in tms_entries %}
+      <TileMatrixSetLink>
+        <TileMatrixSet>{{ tms.id }}</TileMatrixSet>
+      </TileMatrixSetLink>
+      {%- endfor %}
+      <ResourceURL format="{{ tile_formats[0] }}" resourceType="tile"
+          template="{{ online_resource }}wmts/{{ layer.layer_name }}/{TileMatrixSet}/{TileMatrix}/{TileRow}/{TileCol}"/>
+    </Layer>
+    {%- endfor %}
+    {%- for tms in tms_entries %}
+    <TileMatrixSet>
+      <ows:Title>{{ tms.title }}</ows:Title>
+      <ows:Identifier>{{ tms.id }}</ows:Identifier>
+      <ows:SupportedCRS>{{ tms.crs_uri }}</ows:SupportedCRS>
+      {%- for m in tms.matrices %}
+      <TileMatrix>
+        <ows:Identifier>{{ m.id }}</ows:Identifier>
+        <ScaleDenominator>{{ m.scale_denominator }}</ScaleDenominator>
+        <TopLeftCorner>{{ m.top_left_corner }}</TopLeftCorner>
+        <TileWidth>{{ m.tile_width }}</TileWidth>
+        <TileHeight>{{ m.tile_height }}</TileHeight>
+        <MatrixWidth>{{ m.matrix_width }}</MatrixWidth>
+        <MatrixHeight>{{ m.matrix_height }}</MatrixHeight>
+      </TileMatrix>
+      {%- endfor %}
+    </TileMatrixSet>
+    {%- endfor %}
+  </Contents>
+</Capabilities>

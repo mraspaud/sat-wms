@@ -9,6 +9,7 @@ config = Config("sat_wms", defaults=[{
     "granule_interval": "5m",
     "force_webp": False,
     "empty_no_content": False,
+    "wmts_max_zoom": 9,
     # Number of (filepath, bbox, crs, width, height) combinations to keep in the
     # in-process tile read cache. Each entry holds a NumPy masked array; at
     # 512×512 RGBA that's roughly 1 MB per entry, so 1024 ≈ 1 GB.
