@@ -76,9 +76,9 @@ async def wmts_endpoint(duration_str: str, request: Request):
 
     layer = params.get("LAYER")
     tms_id = params.get("TILEMATRIXSET")
-    z = params.get("TILEMATRIX")
-    y = params.get("TILEROW")
-    x = params.get("TILECOL")
+    z = int(params.get("TILEMATRIX"))
+    y = int(params.get("TILEROW"))
+    x = int(params.get("TILECOL"))
 
     if None in (layer, tms_id, z, y, x):
         raise HTTPException(status_code=400, detail="Missing required WMTS KVP parameters.")
