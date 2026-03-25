@@ -54,23 +54,7 @@ def _wms_exception(msg: str, code: str | None = None) -> Response:
 
 @app.get("/{duration_str}/wmts/")
 @app.get("/{duration_str}/wmts")
-async def wmts_capabilities_endpoint(duration_str: str, request: Request):
-    """Dispatch WMTS GetCapabilities requests."""
-    mda = request.app.state.mda
-    online_resource = f"{config.get('base_url')}/{duration_str}/"
-    return await generate_wmts_capabilities(
-        mda,
-        request=request,
-        online_resource=online_resource,
-        supported_crs=config.get("supported_crs"),
-        interval_min=parse_interval_min(config.get("granule_interval")),
-        force_webp=bool(config.get("force_webp")),
-        wmts_max_zoom=int(config.get("wmts_max_zoom")),
-    )
-
-
-@app.get("/{duration_str}/wmts/")
-async def wmts_kvp_endpoint(
+async def wmts_endpoint(
     duration_str: str,
     request: Request,
     # Map the OGC KVP names to local variables
@@ -79,12 +63,23 @@ async def wmts_kvp_endpoint(
     z: int = Query(None, alias="tilematrix"),
     y: int = Query(None, alias="tilerow"),
     x: int = Query(None, alias="tilecol"),
-    request_type: str = Query(None, alias="request"),
+    request_type: str = Query(None, alias="request")
 ):
-    """Handle WMTS KVP (Key-Value Pair) requests.
+    """Dispatch WMTS requests."""
+    mda = request.app.state.mda
+    req = (request_type or "GetCapabilities").upper()
+    if req == "GETCAPABILITIES":
+        online_resource = f"{config.get('base_url')}/{duration_str}/"
+        return await generate_wmts_capabilities(
+            mda,
+            request=request,
+            online_resource=online_resource,
+            supported_crs=config.get("supported_crs"),
+            interval_min=parse_interval_min(config.get("granule_interval")),
+            force_webp=bool(config.get("force_webp")),
+            wmts_max_zoom=int(config.get("wmts_max_zoom")),
+        )
 
-    Translates 'TileMatrix' and friends into z, y, x.
-    """
     # 1. Check if it's actually a GetTile request
     if request_type and request_type.upper() != "GETTILE":
         # If it's GetCapabilities, you'd handle that here or elsewhere
