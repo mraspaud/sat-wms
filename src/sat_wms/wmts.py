@@ -42,7 +42,7 @@ def _read_tile(fp: str, tms_id: str, x: int, y: int, z: int):
         try:
             return cog.tile(x, y, z)
         except TileOutsideBounds:
-            return Response(status_code=204)
+            return None
 
 
 def _tms_entry(tms: morecantile.TileMatrixSet, max_zoom: int) -> dict:
