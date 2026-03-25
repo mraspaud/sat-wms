@@ -3,7 +3,7 @@ import contextlib
 import logging
 import time
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 
@@ -54,21 +54,12 @@ def _wms_exception(msg: str, code: str | None = None) -> Response:
 
 @app.get("/{duration_str}/wmts/")
 @app.get("/{duration_str}/wmts")
-async def wmts_endpoint(
-    duration_str: str,
-    request: Request,
-    # Map the OGC KVP names to local variables
-    layer: str = Query(None, alias="layer"),
-    tms_id: str = Query(None, alias="tilematrixset"),
-    z: int = Query(None, alias="tilematrix"),
-    y: int = Query(None, alias="tilerow"),
-    x: int = Query(None, alias="tilecol"),
-    request_type: str = Query(None, alias="request")
-):
+async def wmts_endpoint(duration_str: str, request: Request):
     """Dispatch WMTS requests."""
     mda = request.app.state.mda
-    req = (request_type or "GetCapabilities").upper()
-    if req == "GETCAPABILITIES":
+    params = {k.upper(): v for k, v in request.query_params.items()}
+    request_type = params.get("REQUEST", "GetCapabilities").upper()
+    if request_type == "GETCAPABILITIES":
         online_resource = f"{config.get('base_url')}/{duration_str}/"
         return await generate_wmts_capabilities(
             mda,
@@ -80,22 +71,18 @@ async def wmts_endpoint(
             wmts_max_zoom=int(config.get("wmts_max_zoom")),
         )
 
-    # 1. Check if it's actually a GetTile request
     if request_type and request_type.upper() != "GETTILE":
-        # If it's GetCapabilities, you'd handle that here or elsewhere
         raise HTTPException(status_code=400, detail="Only GetTile is supported at this KVP endpoint.")
 
-    # 2. Extract query params once for the rest of the logic
-    # OGC specifies case-insensitivity, so we normalize keys to uppercase
-    params = {k.upper(): v for k, v in request.query_params.items()}
+    layer = params.get("LAYER")
+    tms_id = params.get("TILEMATRIXSET")
+    z = params.get("TILEMATRIX")
+    y = params.get("TILEROW")
+    x = params.get("TILECOL")
 
-    # 3. Validation: KVP clients are notorious for missing params
     if None in (layer, tms_id, z, y, x):
         raise HTTPException(status_code=400, detail="Missing required WMTS KVP parameters.")
 
-    mda = request.app.state.mda
-
-    # 4. Delegate to your existing worker function
     return await generate_tile(
         mda,
         layer=layer,
