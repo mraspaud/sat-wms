@@ -183,6 +183,27 @@ def test_wmts_capabilities_endpoint_returns_200(wmts_client):
     assert "NorthPolarLAEAEurope" in res.text
 
 
+def test_wmts_tile_endpoint_accepts_lowercase_time(wmts_client):
+    """Lowercase 'time' query param is respected (future time → transparent PNG, not today's data)."""
+    res = wmts_client.get(
+        "/6h/wmts/true_color_day/NorthPolarLAEAEurope/3/4/3",
+        params={"time": "2099-01-01T00:00:00Z"},
+    )
+    # With lowercase time honoured, no granules match → empty image (200 transparent PNG)
+    assert res.status_code == 200
+    assert res.content[:4] == b"\x89PNG"
+
+
+def test_wmts_tile_endpoint_accepts_lowercase_format(wmts_client):
+    """Lowercase 'format=image/webp' is respected and returns a WebP tile."""
+    res = wmts_client.get(
+        "/6h/wmts/true_color_day/NorthPolarLAEAEurope/3/4/3",
+        params={"time": "2099-01-01T00:00:00Z", "format": "image/webp"},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/webp"
+
+
 def test_wmts_tile_endpoint_returns_png(wmts_client):
     """GET /{duration_str}/wmts/{layer}/NorthPolarLAEAEurope/3/4/3 returns a PNG."""
     res = wmts_client.get(

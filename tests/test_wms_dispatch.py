@@ -39,6 +39,28 @@ def test_correct_version_is_accepted(client):
     assert res.status_code == 200
 
 
+def test_lowercase_request_param_is_accepted(client):
+    """Lowercase 'request=GetCapabilities' is accepted (case-insensitive params)."""
+    res = client.get("/30m/", params={"request": "GetCapabilities"})
+    assert res.status_code == 200
+
+
+def test_lowercase_request_value_is_accepted(client):
+    """'request=getcapabilities' (lowercase value) is dispatched correctly."""
+    res = client.get("/30m/", params={"REQUEST": "getcapabilities"})
+    assert res.status_code == 200
+
+
+def test_mixed_case_request_value_is_accepted(client):
+    """'REQUEST=GETMAP' (all-caps value) does not return 400 unknown request."""
+    res = client.get("/30m/", params={
+        "REQUEST": "GETMAP", "LAYERS": "true_color_day",
+        "CRS": "EPSG:3575", "BBOX": "-1320000,-2781000,569250,245250",
+        "WIDTH": "256", "HEIGHT": "256", "TIME": "2099-01-01T00:00:00Z",
+    })
+    assert res.status_code == 200
+
+
 def test_invalid_crs_returns_exception_xml(client):
     """An unresolvable CRS returns a ServiceException with code InvalidCRS."""
     res = client.get("/30m/", params={

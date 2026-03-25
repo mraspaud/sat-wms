@@ -75,7 +75,7 @@ async def wmts_tile_endpoint(
 ):
     """Dispatch WMTS GetTile requests."""
     mda = request.app.state.mda
-    params = request.query_params
+    params = {k.upper(): v for k, v in request.query_params.items()}
     return await generate_tile(
         mda,
         layer=layer,
@@ -109,8 +109,8 @@ async def wms_endpoint(duration_str: str, request: Request):
     force_webp = bool(config.get("force_webp"))
     empty_no_content = bool(config.get("empty_no_content"))
 
-    match params.get("REQUEST"):
-        case "GetCapabilities":
+    match (params.get("REQUEST") or "").upper():
+        case "GETCAPABILITIES":
             return await generate_capabilities(
                 mda,
                 request=request,
@@ -119,7 +119,7 @@ async def wms_endpoint(duration_str: str, request: Request):
                 interval_min=interval_min,
                 force_webp=force_webp,
             )
-        case "GetMap":
+        case "GETMAP":
             from pyproj.exceptions import CRSError  # noqa: PLC0415
 
             from sat_wms.getmap import generate_map  # noqa: PLC0415
