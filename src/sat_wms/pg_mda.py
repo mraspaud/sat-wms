@@ -75,7 +75,7 @@ class PooledMetadataRepository:
                     "start_dt": start_dt,
                     "end_dt": end_dt,
                     "minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy,
-                    "srid": src_srid,
+                    "srid": src_srid, "src_srid": src_srid,
                 })
                 rows = await cur.fetchall()
                 return [
