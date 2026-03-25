@@ -144,6 +144,15 @@ def test_parse_params_epsg3575_no_axis_swap():
     assert result.bbox == (-1320000.0, -2781000.0, 569250.0, 245250.0)
 
 
+def test_empty_png_caches_result():
+    """_empty_png returns the same bytes object for identical dimensions (LRU cache hit)."""
+    from sat_wms.getmap import _empty_png
+
+    result1 = _empty_png(256, 256)
+    result2 = _empty_png(256, 256)
+    assert result1 is result2
+
+
 def test_read_one_caches_result(test_tif):
     """_read_one returns the same ImageData object for identical arguments (LRU cache hit)."""
     from sat_wms.getmap import _read_one

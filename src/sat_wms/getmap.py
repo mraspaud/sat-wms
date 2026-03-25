@@ -105,8 +105,9 @@ def _render(filepaths, bbox, width, height, dst_crs):
     return result.render(img_format="PNG", zlevel=1)
 
 
-def _empty_png(width, height):
-    """Return a transparent PNG of the given dimensions."""
+@functools.lru_cache(maxsize=32)
+def _empty_png(width: int, height: int) -> bytes:
+    """Return a transparent PNG of the given dimensions (cached per size)."""
     data = np.zeros((4, height, width), dtype=np.uint8)
     buf = io.BytesIO()
     with rasterio.MemoryFile() as mem:
@@ -124,16 +125,17 @@ async def generate_map(mda, params: dict, duration: timedelta, interval_min: int
     end_dt = p.time
     start_dt = end_dt - duration
 
+    # Run both queries concurrently — they are independent.
+    latest, filepaths = await asyncio.gather(
+        mda.get_latest_time(p.layer_name),
+        mda.get_map_assets(p.layer_name, list(p.bbox), start_dt, end_dt, src_srid=p.srid),
+    )
+
     # Short TTL if the requested time falls in the same interval bucket as the
     # latest granule — new data may still be arriving for this window.
-    latest = await mda.get_latest_time(p.layer_name)
     is_latest = latest is not None and floor_dt(latest, interval_min) == floor_dt(end_dt, interval_min)
     cache_control = "public, max-age=60" if is_latest else "public, max-age=3600"
     headers = {"Cache-Control": cache_control}
-
-    filepaths = await mda.get_map_assets(
-        p.layer_name, list(p.bbox), start_dt, end_dt, src_srid=p.srid,
-    )
 
     if not filepaths:
         return Response(content=_empty_png(p.width, p.height), media_type="image/png",
