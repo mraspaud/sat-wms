@@ -125,6 +125,16 @@ def test_parse_params_epsg3575_no_axis_swap():
     assert result.bbox == (-1320000.0, -2781000.0, 569250.0, 245250.0)
 
 
+def test_read_one_caches_result(test_tif):
+    """_read_one returns the same ImageData object for identical arguments (LRU cache hit)."""
+    from sat_wms.getmap import _read_one
+
+    bbox = (-1320000.0, -2781000.0, 569250.0, 245250.0)
+    result1 = _read_one(test_tif, bbox, "EPSG:3575", 10, 10)
+    result2 = _read_one(test_tif, bbox, "EPSG:3575", 10, 10)
+    assert result1 is result2
+
+
 @pytest.mark.asyncio
 async def test_generate_map_epsg3857(synth_mda):
     """generate_map accepts an EPSG:3857 BBOX and returns a PNG."""

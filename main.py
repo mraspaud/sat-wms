@@ -1,4 +1,5 @@
 """WMS server entry point."""
+import contextlib
 import logging
 import re
 import time
@@ -8,14 +9,31 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 
-logger = logging.getLogger("sat_wms.access")
-_templates = Jinja2Templates(directory="templates")
-
 from sat_wms.capabilities import generate_capabilities
 from sat_wms.config import config
 from sat_wms.local_mda import make_mda
 
-app = FastAPI(title=config.get("wms_title"))
+logger = logging.getLogger("sat_wms.access")
+_templates = Jinja2Templates(directory="templates")
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialise shared resources (MDA, connection pool) on startup."""
+    conn_str = config.get("database_url")
+    if conn_str.endswith(".csv"):
+        app.state.mda = make_mda(conn_str)
+        yield
+    else:
+        from psycopg_pool import AsyncConnectionPool  # noqa: PLC0415
+
+        from sat_wms.pg_mda import PooledMetadataRepository  # noqa: PLC0415
+        async with AsyncConnectionPool(conn_str, min_size=2, max_size=10) as pool:
+            app.state.mda = PooledMetadataRepository(pool)
+            yield
+
+
+app = FastAPI(title=config.get("wms_title"), lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"])
 
 
@@ -53,7 +71,7 @@ async def wms_endpoint(duration_str: str, request: Request):
     if version and version != "1.3.0":
         return _wms_exception(f"VERSION {version!r} is not supported; only 1.3.0 is implemented.")
 
-    mda = make_mda(config.get("database_url"))
+    mda = request.app.state.mda
     online_resource = f"{config.get('base_url')}/{duration_str}/"
 
     match params.get("REQUEST"):
@@ -66,6 +84,7 @@ async def wms_endpoint(duration_str: str, request: Request):
             )
         case "GetMap":
             from pyproj.exceptions import CRSError  # noqa: PLC0415
+
             from sat_wms.getmap import generate_map  # noqa: PLC0415
             try:
                 return await generate_map(mda, params, _parse_duration(duration_str))

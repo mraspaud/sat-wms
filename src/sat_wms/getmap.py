@@ -1,10 +1,11 @@
 """GetMap request handler."""
 import asyncio
+import functools
 import io
 import os as _os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pyproj
@@ -16,13 +17,14 @@ from rio_tiler.models import ImageData
 
 from sat_wms.time_utils import ceil_dt, floor_dt
 
-# Increase GDAL tile cache if not already configured — dramatically speeds up
-# repeated reads of the same GeoTIFF tiles across requests.
-_os.environ.setdefault("GDAL_CACHEMAX", "512")
+# GDAL performance hints for Cloud Optimized GeoTIFFs.
+_os.environ.setdefault("GDAL_CACHEMAX", "512")                  # tile cache (MB)
+_os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")  # skip dir listing on open
+_os.environ.setdefault("VSI_CACHE", "TRUE")                     # cache range-request headers
+_os.environ.setdefault("VSI_CACHE_SIZE", "25000000")            # 25 MB VSI header cache
 
-# Shared executor for parallel file reads within a single request.
-# Sized to cpu_count so we don't over-subscribe across concurrent renders.
-_READ_POOL = ThreadPoolExecutor(max_workers=_os.cpu_count())
+# I/O-bound COG reads benefit from more threads than CPU cores.
+_READ_POOL = ThreadPoolExecutor(max_workers=_os.cpu_count() * 4)
 
 # Limit concurrent renders per worker to prevent _READ_POOL starvation when
 # many requests arrive simultaneously. Sized to cpu_count so each render
@@ -66,43 +68,40 @@ def _parse_params(params: dict) -> WmsParams:
                      width=width, height=height, time=time)
 
 
-def _read_one(fp, bbox, dst, width, height):
+@functools.lru_cache(maxsize=128)
+def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int) -> ImageData:
     """Read a single GeoTIFF into an ImageData (runs in a thread)."""
+    dst = CRS.from_authority(*dst_crs.split(":"))
     with COGReader(fp) as cog:
-        return cog.part(bbox, bounds_crs=dst, dst_crs=dst,
-                        width=width, height=height)
+        return cog.part(bbox, bounds_crs=dst, dst_crs=dst, width=width, height=height)
 
 
-def _composite(imgs):
-    """First-valid-pixel composite, preserving list order (index 0 = highest priority)."""
-    result = imgs[0]
-    for img in imgs[1:]:
+def _render(filepaths, bbox, width, height, dst_crs):
+    """Read all GeoTIFFs in parallel, composite newest-first, return PNG bytes.
+
+    Composites as each future arrives (streaming): once the canvas is full,
+    remaining slow futures are skipped rather than waited on.
+
+    Runs synchronously — call via asyncio.to_thread so the event loop
+    stays free to accept other requests while GDAL does I/O.
+    """
+    futures = [_READ_POOL.submit(_read_one, fp, bbox, dst_crs, width, height) for fp in filepaths]
+    result = None
+    for f in futures:
+        img = f.result()
+        if result is None:
+            result = img
+            continue
         if not np.any(result.array.mask):
-            break  # canvas full, no holes left
+            break  # canvas full; skip remaining futures
         no_data = np.all(result.array.mask, axis=0, keepdims=True)
         data = np.where(no_data, img.array.data, result.array.data)
         mask = np.broadcast_to(
             no_data & np.all(img.array.mask, axis=0, keepdims=True),
             data.shape,
         ).copy()
-        result = ImageData(np.ma.MaskedArray(data, mask),
-                           bounds=result.bounds, crs=result.crs)
-    return result
-
-
-def _render(filepaths, bbox, width, height, dst_crs):
-    """Read all GeoTIFFs in parallel, composite newest-first, return PNG bytes.
-
-    Runs synchronously — call via asyncio.to_thread so the event loop
-    stays free to accept other requests while GDAL does I/O.
-    """
-    dst = CRS.from_authority(*dst_crs.split(":"))
-
-    # Read all files concurrently; preserve submission order for compositing.
-    futures = [_READ_POOL.submit(_read_one, fp, bbox, dst, width, height) for fp in filepaths]
-    imgs = [f.result() for f in futures]  # in order: newest first
-
-    return _composite(imgs).render(img_format="PNG", zlevel=1)
+        result = ImageData(np.ma.MaskedArray(data, mask), bounds=result.bounds, crs=result.crs)
+    return result.render(img_format="PNG", zlevel=1)
 
 
 def _empty_png(width, height):
