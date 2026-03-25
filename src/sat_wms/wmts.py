@@ -8,6 +8,7 @@ import numpy as np
 import pyproj
 from fastapi import Response
 from fastapi.templating import Jinja2Templates
+from rio_tiler.errors import TileOutsideBounds
 
 from sat_wms.config import config
 from sat_wms.getmap import _READ_POOL, _RENDER_SEM, _cache_control, _empty_image, _merge
@@ -38,7 +39,10 @@ def _read_tile(fp: str, tms_id: str, x: int, y: int, z: int):
     from rio_tiler.io import COGReader  # noqa: PLC0415
 
     with COGReader(fp, tms=get_by_name(tms_id)) as cog:
-        return cog.tile(x, y, z)
+        try:
+            return cog.tile(x, y, z)
+        except TileOutsideBounds:
+            return Response(status_code=204)
 
 
 def _tms_entry(tms: morecantile.TileMatrixSet, max_zoom: int) -> dict:
