@@ -2,6 +2,7 @@
 import asyncio
 import functools
 from datetime import datetime, timedelta, timezone
+from importlib.resources import files
 
 import morecantile
 import numpy as np
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 
 _BATCH_SIZE = 4
 
-_templates = Jinja2Templates(directory="templates")
+_templates = Jinja2Templates(directory=str(files("sat_wms").joinpath("templates")))
 
 # Reproject from EPSG:3575 (storage CRS) to WGS84 for ows:WGS84BoundingBox.
 _TO_WGS84 = pyproj.Transformer.from_crs("EPSG:3575", "EPSG:4326", always_xy=True)

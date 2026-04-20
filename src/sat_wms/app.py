@@ -2,6 +2,7 @@
 import contextlib
 import logging
 import time
+from importlib.resources import files
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +16,7 @@ from sat_wms.tms_registry import build_registry
 from sat_wms.wmts import generate_tile, generate_wmts_capabilities
 
 logger = logging.getLogger("sat_wms.access")
-_templates = Jinja2Templates(directory="templates")
+_templates = Jinja2Templates(directory=str(files("sat_wms").joinpath("templates")))
 
 
 @contextlib.asynccontextmanager

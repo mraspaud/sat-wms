@@ -1,10 +1,12 @@
 """Get capabilities."""
+from importlib.resources import files
+
 from fastapi.templating import Jinja2Templates
 
 from sat_wms.config import config
 from sat_wms.time_utils import ceil_dt, floor_dt
 
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory=str(files("sat_wms").joinpath("templates")))
 
 
 def _parse_postgis_box(bbox_str: str) -> tuple[str, str, str, str]:
