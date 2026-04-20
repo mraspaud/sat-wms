@@ -1,6 +1,8 @@
 """PostGIS-backed metadata repository."""
 from psycopg.rows import dict_row
 
+from sat_wms.config import config
+
 
 def _parse_box(box_str: str) -> tuple[float, float, float, float]:
     """Parse a PostGIS BOX string into (minx, miny, maxx, maxy)."""
@@ -20,13 +22,13 @@ class PooledMetadataRepository:
         async with self._pool.connection() as conn:
             conn.row_factory = dict_row
             async with conn.cursor() as cur:
-                await cur.execute("""
+                await cur.execute(f"""
                     SELECT
                         product_name AS layer_name,
                         MIN(time) AS start_time,
                         MAX(time) AS end_time,
                         ST_Extent(geom)::text AS bbox
-                    FROM public.products_viirs
+                    FROM {config["products_table_name"]}
                     GROUP BY product_name;
                 """)
                 return await cur.fetchall()
@@ -37,8 +39,8 @@ class PooledMetadataRepository:
             conn.row_factory = dict_row
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT MAX(time) AS t FROM public.products_viirs WHERE product_name = %s",
-                    (layer_name,),
+                    "SELECT MAX(time) AS t FROM %s WHERE product_name = %s",
+                    (config["products_table_name"], layer_name,),
                 )
                 row = await cur.fetchone()
                 return row["t"] if row else None
@@ -60,7 +62,7 @@ class PooledMetadataRepository:
                     SELECT filename,
                            ST_Extent(ST_Transform(geom, %(src_srid)s))::text AS granule_bbox,
                            %(src_srid)s AS bbox_srid
-                    FROM public.products_viirs
+                    FROM {config["products_table_name"]}
                     WHERE product_name = %(layer_name)s
                       AND time >= %(start_dt)s
                       AND time <= %(end_dt)s
