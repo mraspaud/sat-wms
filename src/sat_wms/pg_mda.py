@@ -39,8 +39,8 @@ class PooledMetadataRepository:
             conn.row_factory = dict_row
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT MAX(time) AS t FROM %s WHERE product_name = %s",
-                    (config["products_table_name"], layer_name,),
+                    f"SELECT MAX(time) AS t FROM {config['products_table_name']} WHERE product_name = %s",
+                    (layer_name,),
                 )
                 row = await cur.fetchone()
                 return row["t"] if row else None
