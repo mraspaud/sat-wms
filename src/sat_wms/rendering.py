@@ -2,6 +2,7 @@
 import asyncio
 import os
 import struct
+import warnings
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -12,12 +13,18 @@ from rio_tiler.models import ImageData
 from sat_wms.time_utils import floor_dt
 
 # GDAL performance hints for Cloud-Optimized GeoTIFFs.
-os.environ.setdefault("GDAL_CACHEMAX", "512")                       # tile cache (MB)
+os.environ.setdefault("GDAL_CACHEMAX", "1024")                      # tile cache (MB) — doubled for large SAR COGs
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")  # skip dir listing on open
 os.environ.setdefault("VSI_CACHE", "TRUE")                          # cache range-request headers
-os.environ.setdefault("VSI_CACHE_SIZE", "25000000")                 # 25 MB VSI header cache
+os.environ.setdefault("VSI_CACHE_SIZE", "50000000")                 # 50 MB VSI header cache
+os.environ.setdefault("GDAL_INGESTED_BYTES_AT_OPEN", "32768")       # pre-fetch 32 kB COG header in one request
 os.environ.setdefault("GDAL_NUM_THREADS", "ALL_CPUS")               # multi-threaded decompression
 os.environ.setdefault("GDAL_BAND_BLOCK_CACHE", "HASHSET")           # faster for sparse COG reads
+
+# JPEG-compressed COGs store NoData=0, but JPEG's lossy compression can produce
+# pixels with value exactly 0 in valid data areas.  GDAL bumps these 0→1 during
+# warping, which is visually imperceptible for uint8 RGB but very noisy in logs.
+warnings.filterwarnings("ignore", ".*has been changed.*to avoid being treated as NoData")
 
 # I/O-bound COG reads benefit from more threads than CPU cores.
 READ_POOL = ThreadPoolExecutor(max_workers=os.cpu_count() * 4)

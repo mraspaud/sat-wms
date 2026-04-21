@@ -89,6 +89,16 @@ async def test_wmts_capabilities_dimension_step_reflects_interval(local_mda):
     assert b"PT5M" in resp.body
 
 
+@pytest.mark.asyncio
+async def test_wmts_capabilities_hourly_interval_uses_iso_hours(local_mda):
+    """A 60-minute interval must appear as PT1H, not PT60M."""
+    from sat_wms.wmts import generate_wmts_capabilities
+
+    resp = await generate_wmts_capabilities(local_mda, interval_min=60)
+    assert b"PT1H" in resp.body
+    assert b"PT60M" not in resp.body
+
+
 # ---------------------------------------------------------------------------
 # Tile generation (iterations 9-16)
 # ---------------------------------------------------------------------------
@@ -229,10 +239,110 @@ async def test_generate_tile_cache_control_short_ttl_for_latest():
 # HTTP dispatch (iterations 17-18)
 # ---------------------------------------------------------------------------
 
+
+def test_composite_tiles_batch_size_is_large_enough_for_sar():
+    """_BATCH_SIZE must be >= 32 to minimise sequential round-trips for large SAR windows."""
+    from sat_wms.wmts import _BATCH_SIZE
+
+    assert _BATCH_SIZE >= 32
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_serves_from_disk_cache(tmp_path):
+    """generate_tile returns cached bytes without calling the repository when cache hits."""
+    from datetime import datetime, timedelta, timezone
+
+    from sat_wms.config import config
+    from sat_wms.tile_cache import TileCache
+    from sat_wms.time_utils import floor_dt
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+
+    interval_min = 60
+    end_dt = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
+
+    cache = TileCache(cache_dir=str(tmp_path))
+    cache.put("test_layer", "NorthPolarLAEAEurope", 3, 4, 5, time_bucket, "png", b"\x89PNG-cached")
+
+    class ShouldNotBeCalledMDA:
+        async def get_latest_time(self, _layer):
+            raise AssertionError("repository should not be called on cache hit")
+
+        async def get_map_assets(self, *_args, **_kwargs):
+            raise AssertionError("repository should not be called on cache hit")
+
+    with config.set({"tile_cache_dir": str(tmp_path)}):
+        resp = await generate_tile(
+            ShouldNotBeCalledMDA(),
+            layer="test_layer",
+            tms_id="NorthPolarLAEAEurope",
+            z=3, y=4, x=5,
+            duration=timedelta(hours=1),
+            time_str="2026-01-01T12:00:00Z",
+            fmt="PNG",
+            interval_min=interval_min,
+        )
+
+    assert resp.body == b"\x89PNG-cached"
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_writes_rendered_tile_to_cache(tmp_path, synth_mda):
+    """After rendering, generate_tile stores the result in the disk cache."""
+    from datetime import datetime, timedelta, timezone
+
+    from sat_wms.config import config
+    from sat_wms.tile_cache import TileCache
+    from sat_wms.time_utils import floor_dt
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    interval_min = 60
+
+    with config.set({"tile_cache_dir": str(tmp_path)}):
+        resp = await generate_tile(
+            synth_mda,
+            layer="true_color_day",
+            tms_id="NorthPolarLAEAEurope",
+            z=3, y=4, x=3,
+            duration=timedelta(hours=6),
+            time_str="2026-03-24T06:00:00Z",
+            fmt="PNG",
+            interval_min=interval_min,
+        )
+
+    assert resp.status_code == 200
+    end_dt = datetime(2026, 3, 24, 6, 0, tzinfo=timezone.utc)
+    time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
+    cache = TileCache(cache_dir=str(tmp_path))
+    cached = cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, time_bucket, "png")
+    assert cached == resp.body
+
+
+def test_read_tile_uses_bilinear_resampling():
+    """_read_tile must pass resampling_method='bilinear' to COGReader.tile to prevent seam artefacts."""
+    from unittest.mock import MagicMock, patch
+
+    from sat_wms.wmts import _read_tile
+
+    _read_tile.cache_clear()
+    mock_cog = MagicMock()
+    mock_cog.__enter__ = MagicMock(return_value=mock_cog)
+    mock_cog.__exit__ = MagicMock(return_value=False)
+
+    with patch("rio_tiler.io.COGReader", return_value=mock_cog):
+        _read_tile("test.tif", "NorthPolarLAEAEurope", 3, 4, 3)
+
+    mock_cog.tile.assert_called_once_with(3, 4, 3, resampling_method="bilinear")
+
 @pytest.fixture
 def wmts_client(local_mda):
     """TestClient with LocalMetadataRepository injected via app.state."""
-    from main import app
+    from sat_wms.app import app
     app.state.mda = local_mda
     from fastapi.testclient import TestClient
     return TestClient(app)

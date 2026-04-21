@@ -220,3 +220,23 @@ async def test_many_assets_returns_valid_png():
 
     assert res.status_code == 200
     assert res.body[:4] == b"\x89PNG"
+
+
+def test_read_one_uses_bilinear_resampling():
+    """_read_one must pass resampling_method='bilinear' to COGReader.part to prevent seam artefacts."""
+    from unittest.mock import MagicMock, patch
+
+    from sat_wms.getmap import _read_one
+
+    _read_one.cache_clear()
+    mock_cog = MagicMock()
+    mock_cog.__enter__ = MagicMock(return_value=mock_cog)
+    mock_cog.__exit__ = MagicMock(return_value=False)
+
+    import rasterio
+    with patch("sat_wms.getmap.COGReader", return_value=mock_cog):
+        with rasterio.Env():
+            _read_one("test.tif", (0.0, 0.0, 1.0, 1.0), "EPSG:3575", 256, 256)
+
+    _, call_kwargs = mock_cog.part.call_args
+    assert call_kwargs.get("resampling_method") == "bilinear"

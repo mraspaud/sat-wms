@@ -13,14 +13,15 @@ from rio_tiler.errors import TileOutsideBounds
 
 from sat_wms.config import config
 from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, cache_control, composite_images, empty_image
-from sat_wms.time_utils import ceil_dt, floor_dt
+from sat_wms.tile_cache import TileCache
+from sat_wms.time_utils import _to_iso_duration, ceil_dt, floor_dt
 from sat_wms.tms_registry import all_tms, build_registry, get_by_name
 
 TYPE_CHECKING = False
 if TYPE_CHECKING:
     from rio_tiler.models import ImageData
 
-_BATCH_SIZE = 4
+_BATCH_SIZE = 32
 
 _templates = Jinja2Templates(directory=str(files("sat_wms").joinpath("templates")))
 
@@ -37,13 +38,15 @@ def _ows_exception(msg: str, code: str) -> Response:
 @functools.lru_cache(maxsize=config.get("tile_cache_entries"))
 def _read_tile(fp: str, tms_id: str, x: int, y: int, z: int):
     """Read a 256×256 tile from a COG via COGReader.tile() (LRU-cached, runs in a thread)."""
+    import rasterio  # noqa: PLC0415
     from rio_tiler.io import COGReader  # noqa: PLC0415
 
-    with COGReader(fp, tms=get_by_name(tms_id)) as cog:
-        try:
-            return cog.tile(x, y, z)
-        except TileOutsideBounds:
-            return None
+    with rasterio.Env():
+        with COGReader(fp, tms=get_by_name(tms_id)) as cog:
+            try:
+                return cog.tile(x, y, z, resampling_method="bilinear")
+            except TileOutsideBounds:
+                return None
 
 
 def _tms_entry(tms: morecantile.TileMatrixSet, max_zoom: int) -> dict:
@@ -117,7 +120,7 @@ async def generate_wmts_capabilities(
             "layers": layers,
             "tms_entries": tms_entries,
             "tile_formats": tile_formats,
-            "interval_iso": f"PT{interval_min}M",
+            "interval_iso": _to_iso_duration(interval_min),
         },
         media_type="text/xml",
     )
@@ -132,8 +135,8 @@ async def _composite_tiles(filepaths: list[str], tms_id: str, x: int, y: int, z:
     for start in range(0, len(filepaths), _BATCH_SIZE):
         batch = filepaths[start:start + _BATCH_SIZE]
         aws = [loop.run_in_executor(READ_POOL, _read_tile, fp, tms_id, x, y, z) for fp in batch]
-        for aw in aws:
-            img = await aw
+        batch_images = await asyncio.gather(*aws)
+        for img in batch_images:
             images.append(img)
             if img is not None:
                 no_data = np.all(img.array.mask, axis=0)
@@ -174,6 +177,7 @@ async def generate_tile(
     if force_webp:
         fmt = "WEBP"
     media_type = MEDIA_TYPES[fmt]
+    ext = fmt.lower()
 
     end_dt = (
         datetime.fromisoformat(time_str.replace("Z", "+00:00"))
@@ -181,6 +185,15 @@ async def generate_tile(
         else datetime.now(timezone.utc)
     )
     start_dt = end_dt - duration
+    time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
+
+    tile_cache = TileCache(
+        cache_dir=config.get("tile_cache_dir"),
+        ttl_days=config.get("tile_cache_ttl_days"),
+    )
+    cached = tile_cache.get(layer, tms_id, z, y, x, time_bucket, ext)
+    if cached is not None:
+        return Response(content=cached, media_type=media_type)
 
     bounds = tms.xy_bounds(morecantile.Tile(x, y, z))
     bbox_list = [bounds.left, bounds.bottom, bounds.right, bounds.top]
@@ -213,4 +226,5 @@ async def generate_tile(
             None, functools.partial(result.render, **render_kwargs)
         )
 
+    tile_cache.put(layer, tms_id, z, y, x, time_bucket, ext, image)
     return Response(content=image, media_type=media_type, headers=headers)

@@ -22,6 +22,17 @@ async def test_capabilities_dimension_uses_configured_interval(local_mda):
 
 
 @pytest.mark.asyncio
+async def test_capabilities_hourly_interval_uses_iso_hours(local_mda):
+    """A 60-minute interval must appear as PT1H, not PT60M."""
+    from sat_wms.capabilities import generate_capabilities
+
+    res = await generate_capabilities(local_mda, interval_min=60)
+    xml = res.body.decode()
+    assert "PT1H" in xml
+    assert "PT60M" not in xml
+
+
+@pytest.mark.asyncio
 async def test_capabilities_title_comes_from_config(local_mda):
     """The WMS capabilities title is read from the wms_title config key."""
     import sat_wms.config as cfg

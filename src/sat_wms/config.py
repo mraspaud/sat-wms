@@ -14,5 +14,8 @@ config = Config("sat_wms", defaults=[{
     # in-process tile read cache. Each entry holds a NumPy masked array; at
     # 512×512 RGBA that's roughly 1 MB per entry, so 1024 ≈ 1 GB.
     "tile_cache_entries": 128,
-    "products_table_name": "public.products_sat"
+    "products_table_name": "public.products_sat",
+    # Disk tile cache: set tile_cache_dir to a writable path to enable.
+    "tile_cache_dir": "",
+    "tile_cache_ttl_days": 7,
 }])

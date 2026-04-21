@@ -27,6 +27,16 @@ def parse_interval_min(s: str) -> int:
     return value if unit == "m" else value * 60
 
 
+def _to_iso_duration(interval_min: int) -> str:
+    """Return an ISO 8601 duration string for an interval given in minutes.
+
+    Outputs canonical form: PT1H for 60 minutes, PT2H for 120, PT5M for 5, etc.
+    """
+    if interval_min % 60 == 0:
+        return f"PT{interval_min // 60}H"
+    return f"PT{interval_min}M"
+
+
 def floor_dt(dt: datetime, interval_min: int = 10) -> datetime:
     """Floor datetime to the nearest grid interval (e.g., 12:08 -> 12:00)."""
     return dt.replace(minute=(dt.minute // interval_min) * interval_min,

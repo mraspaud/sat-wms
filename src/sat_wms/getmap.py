@@ -98,9 +98,13 @@ def _parse_params(params: dict) -> WmsParams:
 @functools.lru_cache(maxsize=config.get("tile_cache_entries"))
 def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
     """Read a single GeoTIFF into an ImageData (runs in a thread)."""
+    import rasterio  # noqa: PLC0415
+
     dst = CRS.from_authority(*dst_crs.split(":"))
-    with COGReader(fp) as cog:
-        return cog.part(bbox, bounds_crs=dst, dst_crs=dst, width=width, height=height)
+    with rasterio.Env():
+        with COGReader(fp) as cog:
+            return cog.part(bbox, bounds_crs=dst, dst_crs=dst, width=width, height=height,
+                            resampling_method="bilinear")
 
 
 def _merge_sub(canvas, gaps, img, col_min, row_min, col_max, row_max):
@@ -135,8 +139,8 @@ async def _read_and_composite(assets, p):
     if not reads:
         return None
 
-    for aw, (col_min, row_min, col_max, row_max) in zip(reads, regions, strict=False):
-        img = await aw
+    images = await asyncio.gather(*reads)
+    for img, (col_min, row_min, col_max, row_max) in zip(images, regions, strict=False):
         if img is None:
             continue
         if canvas is None:

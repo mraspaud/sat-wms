@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client(local_mda):
     """TestClient with LocalMetadataRepository injected via app.state."""
-    from main import app
+    from sat_wms.app import app
     app.state.mda = local_mda
     return TestClient(app)
 
@@ -15,7 +15,7 @@ def test_lifespan_sets_app_state_mda(monkeypatch, local_mda):
     """The lifespan initialises app.state.mda on startup."""
     from sat_wms import local_mda as local_mda_mod
     monkeypatch.setattr(local_mda_mod, "make_mda", lambda _: local_mda)
-    from main import app
+    from sat_wms.app import app
     with TestClient(app) as c:  # noqa: F841 — triggers lifespan
         assert hasattr(app.state, "mda")
 
