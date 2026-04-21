@@ -450,9 +450,16 @@ async def test_wmts_capabilities_stepped_mode_first_time_is_latest(local_mda):
     assert b"2026-03-24T05:34:29Z" in resp.body
 
 
-# ---------------------------------------------------------------------------
-# generate_tile - stepped timestep mode
-# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_wmts_capabilities_layer_name_prefix_applied(local_mda):
+    """When layer_name_prefix is set, it is prepended to every layer name in WMTS capabilities."""
+    from sat_wms.wmts import generate_wmts_capabilities
+
+    resp = await generate_wmts_capabilities(local_mda, layer_name_prefix="Sentinel-1 SAR ")
+    xml = resp.body.decode()
+    assert "Sentinel-1 SAR true_color_day" in xml
+
+
 
 @pytest.mark.asyncio
 async def test_generate_tile_stepped_mode_uses_exact_time_as_cache_key(tmp_path, synth_mda):

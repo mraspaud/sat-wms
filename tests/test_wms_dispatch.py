@@ -82,3 +82,18 @@ def test_getmap_missing_layers_returns_error(client):
         "HEIGHT": "256",
     })
     assert res.status_code == 400
+
+
+def test_strip_layer_prefix_removes_known_prefix():
+    from sat_wms.app import _strip_layer_prefix
+    assert _strip_layer_prefix("Sentinel-1 SAR sar-ice-log", "Sentinel-1 SAR ") == "sar-ice-log"
+
+
+def test_strip_layer_prefix_noop_when_no_match():
+    from sat_wms.app import _strip_layer_prefix
+    assert _strip_layer_prefix("sar-ice-log", "Sentinel-1 SAR ") == "sar-ice-log"
+
+
+def test_strip_layer_prefix_noop_when_empty_prefix():
+    from sat_wms.app import _strip_layer_prefix
+    assert _strip_layer_prefix("sar-ice-log", "") == "sar-ice-log"

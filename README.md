@@ -141,6 +141,7 @@ All settings are read from environment variables at startup with the prefix `SAT
 | `SAT_WMS_TIMESTEP_MODE` | `interval` | `interval` = fixed-width time buckets (VIIRS-style); `stepped` = discrete "latest + N historical snapshots" (SAR-style) |
 | `SAT_WMS_SNAPSHOT_STEP` | `24h` | Step between historical snapshots in `stepped` mode (e.g. `12h`, `24h`, `48h`) |
 | `SAT_WMS_SNAPSHOT_COUNT` | `7` | Number of historical snapshots advertised in `stepped` mode |
+| `SAT_WMS_LAYER_NAME_PREFIX` | *(empty)* | String prepended to every layer name in GetCapabilities (e.g. `"Sentinel-1 SAR "`). Stripped from inbound layer names on GetMap/GetTile. |
 
 `supported_crs` (list of EPSG codes) can only be set via a YAML config file — environment variables do not support lists. Place the file at one of the standard donfig search paths:
 

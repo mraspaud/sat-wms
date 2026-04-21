@@ -17,7 +17,7 @@ def _parse_postgis_box(bbox_str: str) -> tuple[str, str, str, str]:
 
 async def generate_capabilities(
     mda, request=None, online_resource=None, supported_crs=None, interval_min: int = 10,
-    force_webp: bool = False, duration_str: str | None = None,
+    force_webp: bool = False, duration_str: str | None = None, layer_name_prefix: str = "",
 ):
     """Generate the GetCapabilities document."""
     base_title = config.get("wms_title")
@@ -30,7 +30,7 @@ async def generate_capabilities(
     for layer in raw_layers:
         minx, miny, maxx, maxy = _parse_postgis_box(layer["bbox"])
         entry = {
-            "layer_name": layer["layer_name"],
+            "layer_name": layer_name_prefix + layer["layer_name"],
             "start_str": floor_dt(layer["start_time"], interval_min).strftime("%Y-%m-%dT%H:%M:00Z"),
             "end_str": layer["end_time"].strftime("%Y-%m-%dT%H:%M:%SZ"),
             "end_range_str": ceil_dt(layer["end_time"], interval_min).strftime("%Y-%m-%dT%H:%M:00Z"),

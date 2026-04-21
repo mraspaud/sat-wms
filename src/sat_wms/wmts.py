@@ -93,6 +93,7 @@ async def generate_wmts_capabilities(
     force_webp: bool = False,
     wmts_max_zoom: int = 9,
     duration_str: str | None = None,
+    layer_name_prefix: str = "",
 ) -> Response:
     """Render the WMTS 1.0.0 GetCapabilities document."""
     if supported_crs:
@@ -107,7 +108,7 @@ async def generate_wmts_capabilities(
     for layer in raw_layers:
         lon_min, lat_min, lon_max, lat_max = _bbox_to_wgs84(layer["bbox"])
         entry = {
-            "layer_name": layer["layer_name"],
+            "layer_name": layer_name_prefix + layer["layer_name"],
             "start_str": floor_dt(layer["start_time"], interval_min).strftime("%Y-%m-%dT%H:%M:00Z"),
             "end_str": layer["end_time"].strftime("%Y-%m-%dT%H:%M:%SZ"),
             "end_range_str": ceil_dt(layer["end_time"], interval_min).strftime("%Y-%m-%dT%H:%M:00Z"),

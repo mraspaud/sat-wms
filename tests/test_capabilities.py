@@ -93,3 +93,15 @@ async def test_capabilities_stepped_mode_first_time_is_latest(local_mda):
     xml = res.body.decode()
     # The latest time in test data is 05:34:29
     assert "2026-03-24T05:34:29Z" in xml
+
+
+@pytest.mark.asyncio
+async def test_capabilities_layer_name_prefix_applied(local_mda):
+    """When layer_name_prefix is set, it is prepended to every layer name in the XML."""
+    from sat_wms.capabilities import generate_capabilities
+
+    res = await generate_capabilities(local_mda, layer_name_prefix="Sentinel-1 SAR ")
+    xml = res.body.decode()
+    assert "Sentinel-1 SAR " in xml
+    # Raw DB name must still appear (as part of the prefixed name)
+    assert "Sentinel-1 SAR true_color_day" in xml

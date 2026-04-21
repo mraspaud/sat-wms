@@ -21,4 +21,5 @@ config = Config("sat_wms", defaults=[{
     "timestep_mode": "interval",
     "snapshot_step": "24h",
     "snapshot_count": 7,
+    "layer_name_prefix": "",
 }])
