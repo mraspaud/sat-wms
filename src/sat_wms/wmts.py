@@ -37,15 +37,35 @@ def _ows_exception(msg: str, code: str) -> Response:
 
 @functools.lru_cache(maxsize=config.get("tile_cache_entries"))
 def _read_tile(fp: str, tms_id: str, x: int, y: int, z: int):
-    """Read a 256×256 tile from a COG via COGReader.tile() (LRU-cached, runs in a thread)."""
+    """Read a 256×256 tile from a COG via COGReader.tile() (LRU-cached, runs in a thread).
+
+    If the file carries GCPs (e.g. raw SAR granules) the dataset is pre-wrapped in a
+    WarpedVRT targeting the TMS CRS so that GDAL overview selection operates in metres
+    rather than degrees, which prevents pixelation at high latitudes.
+    """
+    import contextlib  # noqa: PLC0415
     import logging  # noqa: PLC0415
 
     import rasterio  # noqa: PLC0415
+    from rasterio.enums import Resampling  # noqa: PLC0415
+    from rasterio.transform import from_gcps  # noqa: PLC0415
+    from rasterio.vrt import WarpedVRT  # noqa: PLC0415
     from rio_tiler.io import COGReader  # noqa: PLC0415
 
+    tms = get_by_name(tms_id)
     try:
         with rasterio.Env():
-            with COGReader(fp, tms=get_by_name(tms_id)) as cog:
+            with contextlib.ExitStack() as stack:
+                src = stack.enter_context(rasterio.open(fp))
+                gcps, gcp_crs = src.gcps
+                if gcps:
+                    dataset = stack.enter_context(
+                        WarpedVRT(src, src_crs=gcp_crs, src_transform=from_gcps(gcps),
+                                  crs=tms.crs, resampling=Resampling.bilinear)
+                    )
+                else:
+                    dataset = src
+                cog = stack.enter_context(COGReader(fp, dataset=dataset, tms=tms))
                 try:
                     return cog.tile(x, y, z, resampling_method="bilinear")
                 except TileOutsideBounds:

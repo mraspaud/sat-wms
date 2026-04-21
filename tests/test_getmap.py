@@ -233,8 +233,14 @@ def test_read_one_uses_bilinear_resampling():
     mock_cog.__enter__ = MagicMock(return_value=mock_cog)
     mock_cog.__exit__ = MagicMock(return_value=False)
 
+    mock_src = MagicMock()
+    mock_src.__enter__ = MagicMock(return_value=mock_src)
+    mock_src.__exit__ = MagicMock(return_value=False)
+    mock_src.gcps = ([], None)
+
     import rasterio
-    with patch("sat_wms.getmap.COGReader", return_value=mock_cog):
+    with patch("rasterio.open", return_value=mock_src), \
+         patch("sat_wms.getmap.COGReader", return_value=mock_cog):
         with rasterio.Env():
             _read_one("test.tif", (0.0, 0.0, 1.0, 1.0), "EPSG:3575", 256, 256)
 
@@ -250,3 +256,39 @@ def test_read_one_missing_file_returns_none():
     result = _read_one("/nonexistent/missing.tiff", (-1000000, -2000000, 0, 0), "EPSG:3575", 256, 256)
     assert result is None
     _read_one.cache_clear()
+
+
+def test_read_one_gcp_file_pre_wraps_to_dst_crs(tmp_path):
+    """_read_one must wrap GCP-based COGs in a WarpedVRT targeting dst_crs."""
+    import numpy as np
+    import rasterio
+    from rasterio.control import GroundControlPoint
+    from rasterio.crs import CRS
+
+    from sat_wms.getmap import _read_one
+
+    _read_one.cache_clear()
+
+    fp = str(tmp_path / "gcp.tif")
+    with rasterio.open(fp, "w", driver="GTiff", height=16, width=16, count=1, dtype="uint8") as ds:
+        ds.write(np.zeros((1, 16, 16), dtype="uint8"))
+        ds._set_gcps([  # noqa: SLF001
+            GroundControlPoint(row=0, col=0, x=10.0, y=74.0),
+            GroundControlPoint(row=0, col=15, x=11.0, y=74.0),
+            GroundControlPoint(row=15, col=0, x=10.0, y=73.0),
+            GroundControlPoint(row=15, col=15, x=11.0, y=73.0),
+        ], CRS.from_epsg(4326))
+
+    captured_crs = []
+    real_warp = rasterio.vrt.WarpedVRT
+
+    def spy_vrt(src, **kwargs):
+        captured_crs.append(kwargs.get("crs"))
+        return real_warp(src, **kwargs)
+
+    from unittest.mock import patch
+    with patch("rasterio.vrt.WarpedVRT", side_effect=spy_vrt):
+        _read_one(fp, (-627608, -3909127, -340705, -3738249), "EPSG:3575", 256, 256)
+
+    assert captured_crs, "WarpedVRT was not called — GCP file must be pre-wrapped"
+    assert captured_crs[0] == CRS.from_epsg(3575)

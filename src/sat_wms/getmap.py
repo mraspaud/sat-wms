@@ -98,14 +98,28 @@ def _parse_params(params: dict) -> WmsParams:
 @functools.lru_cache(maxsize=config.get("tile_cache_entries"))
 def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
     """Read a single GeoTIFF into an ImageData (runs in a thread). Returns None if file is missing."""
+    import contextlib  # noqa: PLC0415
     import logging  # noqa: PLC0415
 
     import rasterio  # noqa: PLC0415
+    from rasterio.enums import Resampling  # noqa: PLC0415
+    from rasterio.transform import from_gcps  # noqa: PLC0415
+    from rasterio.vrt import WarpedVRT  # noqa: PLC0415
 
     dst = CRS.from_authority(*dst_crs.split(":"))
     try:
         with rasterio.Env():
-            with COGReader(fp) as cog:
+            with contextlib.ExitStack() as stack:
+                src = stack.enter_context(rasterio.open(fp))
+                gcps, gcp_crs = src.gcps
+                if gcps:
+                    dataset = stack.enter_context(
+                        WarpedVRT(src, src_crs=gcp_crs, src_transform=from_gcps(gcps),
+                                  crs=dst, resampling=Resampling.bilinear)
+                    )
+                else:
+                    dataset = src
+                cog = stack.enter_context(COGReader(fp, dataset=dataset))
                 return cog.part(bbox, bounds_crs=dst, dst_crs=dst, width=width, height=height,
                                 resampling_method="bilinear")
     except (OSError, rasterio.errors.RasterioIOError):

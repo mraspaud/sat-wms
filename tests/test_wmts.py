@@ -334,10 +334,60 @@ def test_read_tile_uses_bilinear_resampling():
     mock_cog.__enter__ = MagicMock(return_value=mock_cog)
     mock_cog.__exit__ = MagicMock(return_value=False)
 
-    with patch("rio_tiler.io.COGReader", return_value=mock_cog):
+    mock_src = MagicMock()
+    mock_src.__enter__ = MagicMock(return_value=mock_src)
+    mock_src.__exit__ = MagicMock(return_value=False)
+    mock_src.gcps = ([], None)
+
+    with patch("rasterio.open", return_value=mock_src), \
+         patch("rio_tiler.io.COGReader", return_value=mock_cog):
         _read_tile("test.tif", "NorthPolarLAEAEurope", 3, 4, 3)
 
     mock_cog.tile.assert_called_once_with(3, 4, 3, resampling_method="bilinear")
+
+
+def test_read_tile_gcp_file_pre_wraps_to_tms_crs(tmp_path):
+    """_read_tile must wrap GCP-based COGs in a WarpedVRT targeting the TMS CRS.
+
+    This ensures GDAL overview selection operates in metres (the TMS CRS units)
+    rather than degrees, which prevents pixelation at high latitudes.
+    """
+    import numpy as np
+    import rasterio
+    from rasterio.control import GroundControlPoint
+    from rasterio.crs import CRS
+
+    from sat_wms.tms_registry import build_registry, get_by_name
+    from sat_wms.wmts import _read_tile
+
+    build_registry(["EPSG:3575"])
+    _read_tile.cache_clear()
+
+    # A small GeoTIFF with GCPs in EPSG:4326 covering Arctic Norway (~74°N, 10-11°E).
+    fp = str(tmp_path / "gcp.tif")
+    with rasterio.open(fp, "w", driver="GTiff", height=16, width=16, count=1, dtype="uint8") as ds:
+        ds.write(np.zeros((1, 16, 16), dtype="uint8"))
+        ds._set_gcps([  # noqa: SLF001
+            GroundControlPoint(row=0, col=0, x=10.0, y=74.0),
+            GroundControlPoint(row=0, col=15, x=11.0, y=74.0),
+            GroundControlPoint(row=15, col=0, x=10.0, y=73.0),
+            GroundControlPoint(row=15, col=15, x=11.0, y=73.0),
+        ], CRS.from_epsg(4326))
+
+    tms = get_by_name("NorthPolarLAEAEurope")
+    captured_crs = []
+    real_warp = rasterio.vrt.WarpedVRT
+
+    def spy_vrt(src, **kwargs):
+        captured_crs.append(kwargs.get("crs"))
+        return real_warp(src, **kwargs)
+
+    from unittest.mock import patch
+    with patch("rasterio.vrt.WarpedVRT", side_effect=spy_vrt):
+        _read_tile(fp, "NorthPolarLAEAEurope", 3, 4, 3)
+
+    assert captured_crs, "WarpedVRT was not called — GCP file must be pre-wrapped"
+    assert captured_crs[0] == tms.crs, f"WarpedVRT must target TMS CRS {tms.crs}, got {captured_crs[0]}"
 
 @pytest.fixture
 def wmts_client(local_mda):

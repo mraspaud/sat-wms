@@ -263,6 +263,12 @@ For typical SAR orbital tracks covering a fraction of the polar domain, only a s
 
 Sentinel-1 IW granules need to be in Cloud-Optimized GeoTIFF format with a properly embedded CRS before sat-wms can serve them.
 
+### GCP-only files (automatic handling)
+
+sat-wms automatically handles COGs that carry **GCPs in EPSG:4326** and no affine transform (the native output of many SAR processors).  At read time, `_read_tile` and `_read_one` detect GCPs and pre-wrap the file in a `WarpedVRT` targeting the serving CRS (EPSG:3575 for WMTS, the requested CRS for WMS GetMap) before passing it to `rio-tiler`.  This ensures GDAL selects overviews in metres rather than degrees, preventing pixelation that would otherwise worsen at high latitudes.
+
+No configuration is needed.  Files with a conventional affine CRS are passed through unchanged.
+
 ### Requirements
 
 | Parameter | Required value | Notes |
