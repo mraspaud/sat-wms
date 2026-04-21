@@ -32,7 +32,7 @@
       <Dimension>
         <ows:Identifier>time</ows:Identifier>
         {% if layer.time_values %}
-        <Default>{{ layer.time_values[0] }}</Default>
+        <Default>{{ layer.time_values[-1] }}</Default>
         <Value>{{ layer.time_values | join(',') }}</Value>
         {% else %}
         <Default>{{ layer.end_str }}</Default>

@@ -44,8 +44,15 @@ def floor_dt(dt: datetime, interval_min: int = 10) -> datetime:
 
 
 def compute_snapshot_times(latest: datetime, step: timedelta, count: int) -> list[datetime]:
-    """Return [latest, latest-step, latest-2*step, …, latest-count*step]."""
-    return [latest - i * step for i in range(count + 1)]
+    """Return sorted list of snapshot times: midnight-based historical steps + latest.
+
+    Historical entries snap to midnight UTC: today's midnight, today's-step, …, today's-(count-1)*step.
+    The result is sorted ascending so the most recent time is last.  Duplicate entries (e.g. when
+    ``latest`` falls exactly on a midnight boundary) are removed.
+    """
+    midnight = latest.replace(hour=0, minute=0, second=0, microsecond=0)
+    snapshots = {midnight - i * step for i in range(count)}
+    return sorted(snapshots | {latest})
 
 
 def ceil_dt(dt: datetime, interval_min: int = 10) -> datetime:
