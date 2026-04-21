@@ -18,4 +18,7 @@ config = Config("sat_wms", defaults=[{
     # Disk tile cache: set tile_cache_dir to a writable path to enable.
     "tile_cache_dir": "",
     "tile_cache_ttl_days": 7,
+    "timestep_mode": "interval",
+    "snapshot_step": "24h",
+    "snapshot_count": 7,
 }])

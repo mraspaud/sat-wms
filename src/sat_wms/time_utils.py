@@ -43,6 +43,11 @@ def floor_dt(dt: datetime, interval_min: int = 10) -> datetime:
                       second=0, microsecond=0)
 
 
+def compute_snapshot_times(latest: datetime, step: timedelta, count: int) -> list[datetime]:
+    """Return [latest, latest-step, latest-2*step, …, latest-count*step]."""
+    return [latest - i * step for i in range(count + 1)]
+
+
 def ceil_dt(dt: datetime, interval_min: int = 10) -> datetime:
     """Ceil datetime to the next grid interval (e.g., 12:05 -> 12:10, 12:00 -> 12:00)."""
     floored = floor_dt(dt, interval_min)

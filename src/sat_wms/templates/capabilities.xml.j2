@@ -33,9 +33,15 @@
                 <BoundingBox CRS="EPSG:3575" 
                     minx="{{ layer.minx }}" miny="{{ layer.miny }}" 
                     maxx="{{ layer.maxx }}" maxy="{{ layer.maxy }}" />
+                {% if layer.time_values %}
+                <Dimension name="time" units="ISO8601" default="{{ layer.time_values[0] }}" nearestValue="0">
+                    {{ layer.time_values | join(',') }}
+                </Dimension>
+                {% else %}
                 <Dimension name="time" units="ISO8601" default="{{ layer.end_str }}" nearestValue="1">
                     {{ layer.start_str }}/{{ layer.end_range_str }}/{{ interval_iso }}
                 </Dimension>
+                {% endif %}
             </Layer>
             {%- endfor %}
         </Layer>

@@ -65,3 +65,31 @@ async def test_capabilities_default_is_raw_latest_time(local_mda):
     assert 'default="2026-03-24T05:34:29Z"' in xml
     # range endpoint must be ceiled (05:40:00) so PT10M grid is valid
     assert "05:40:00Z/PT10M" in xml
+
+
+@pytest.mark.asyncio
+async def test_capabilities_stepped_mode_lists_discrete_times(local_mda):
+    """In 'stepped' mode the Dimension element lists comma-separated ISO timestamps."""
+    import sat_wms.config as cfg
+    from sat_wms.capabilities import generate_capabilities
+
+    with cfg.config.set({"timestep_mode": "stepped", "snapshot_step": "24h", "snapshot_count": 2}):
+        res = await generate_capabilities(local_mda)
+    xml = res.body.decode()
+    # Must NOT contain interval syntax (Z/PTxH or Z/PTxM)
+    assert "Z/PT" not in xml
+    # Must contain at least two comma-separated timestamps
+    assert xml.count("Z,") >= 1
+
+
+@pytest.mark.asyncio
+async def test_capabilities_stepped_mode_first_time_is_latest(local_mda):
+    """In 'stepped' mode the default time equals the layer's latest data time."""
+    import sat_wms.config as cfg
+    from sat_wms.capabilities import generate_capabilities
+
+    with cfg.config.set({"timestep_mode": "stepped", "snapshot_step": "24h", "snapshot_count": 1}):
+        res = await generate_capabilities(local_mda)
+    xml = res.body.decode()
+    # The latest time in test data is 05:34:29
+    assert "2026-03-24T05:34:29Z" in xml

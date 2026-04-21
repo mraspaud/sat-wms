@@ -31,8 +31,13 @@
       {%- endfor %}
       <Dimension>
         <ows:Identifier>time</ows:Identifier>
+        {% if layer.time_values %}
+        <Default>{{ layer.time_values[0] }}</Default>
+        <Value>{{ layer.time_values | join(',') }}</Value>
+        {% else %}
         <Default>{{ layer.end_str }}</Default>
         <Value>{{ layer.start_str }}/{{ layer.end_range_str }}/{{ interval_iso }}</Value>
+        {% endif %}
       </Dimension>
       {%- for tms in tms_entries %}
       <TileMatrixSetLink>

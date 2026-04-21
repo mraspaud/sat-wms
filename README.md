@@ -138,6 +138,9 @@ All settings are read from environment variables at startup with the prefix `SAT
 | `SAT_WMS_TILE_CACHE_ENTRIES` | `128` | Number of COG tile reads to keep in memory (~1 MB each, so `1024` ≈ 1 GB) |
 | `SAT_WMS_TILE_CACHE_DIR` | *(disabled)* | Directory for the **disk tile cache** (see [Disk tile cache](#disk-tile-cache)). Leave empty to disable. |
 | `SAT_WMS_TILE_CACHE_TTL_DAYS` | `7` | Disk cache TTL in days — tiles older than this are evicted on next access |
+| `SAT_WMS_TIMESTEP_MODE` | `interval` | `interval` = fixed-width time buckets (VIIRS-style); `stepped` = discrete "latest + N historical snapshots" (SAR-style) |
+| `SAT_WMS_SNAPSHOT_STEP` | `24h` | Step between historical snapshots in `stepped` mode (e.g. `12h`, `24h`, `48h`) |
+| `SAT_WMS_SNAPSHOT_COUNT` | `7` | Number of historical snapshots advertised in `stepped` mode |
 
 `supported_crs` (list of EPSG codes) can only be set via a YAML config file — environment variables do not support lists. Place the file at one of the standard donfig search paths:
 
@@ -192,11 +195,66 @@ export SAT_WMS_TILE_CACHE_DIR=/var/cache/sat-wms
 export SAT_WMS_TILE_CACHE_TTL_DAYS=7
 ```
 
-Cache layout: `{cache_dir}/{layer}/{tms_id}/{z}/{y}/{x}_{time_bucket}.{ext}` where `time_bucket = floor(request_time, granule_interval)`.
+Cache layout: `{cache_dir}/{layer}/{tms_id}/{z}/{y}/{x}_{time_bucket}.{ext}`.
+
+In **`interval` mode** (default), `time_bucket = floor(request_time, granule_interval)`.  
+In **`stepped` mode**, `time_bucket = exact_request_time` — tiles are keyed to the discrete times advertised in GetCapabilities.
 
 The latest time-bucket is automatically re-rendered after one `granule_interval` so that fresh data is picked up as new granules arrive; all other tiles are held for `tile_cache_ttl_days` days.
 
+In `stepped` mode, when the "latest" time advances (a new granule has been ingested), only tiles that overlap newly-added or newly-removed data are re-rendered.  All other tiles are **hard-linked** to the new time-bucket key (no re-render, no data duplication).  A `_latest.txt` file in `{cache_dir}/{layer}/{tms_id}/` tracks the previous "latest" bucket for this optimisation.
+
 Disk usage is roughly `(tiles per session) × (tile size)`.  For SAR at z=5 over a 48 h window, expect ~1–3 MB per tile.
+
+---
+
+## Stepped timestep mode (SAR / sea-ice charting)
+
+Use `SAT_WMS_TIMESTEP_MODE=stepped` when:
+
+- The data is not time-lapse / animation (no need for fine-grained timestep sliders)
+- Clients should be able to view the **latest aggregated image** plus daily/multi-day historical snapshots
+- The aggregation window is long (12 h – 48 h) and the data changes slowly
+
+### How it works
+
+In `stepped` mode GetCapabilities advertises a **discrete list of timestamps** in the `<Dimension>` element instead of an `start/end/step` interval:
+
+```xml
+<Dimension name="time" units="ISO8601" default="2026-04-21T10:32:00Z">
+    2026-04-21T10:32:00Z,2026-04-20T10:32:00Z,2026-04-19T10:32:00Z,...
+</Dimension>
+```
+
+- The **first entry** is the exact timestamp of the most recent granule in the database.
+- The remaining `snapshot_count` entries step back by `snapshot_step` from that time.
+
+The client passes one of these times as the `TIME` parameter; the server aggregates `duration` back from that moment (e.g. 48 h).
+
+### Example SAR configuration
+
+```bash
+export SAT_WMS_DATABASE_URL=data/sar/sar.csv   # or PostGIS URL
+export SAT_WMS_TIMESTEP_MODE=stepped
+export SAT_WMS_SNAPSHOT_STEP=24h               # daily historical snapshots
+export SAT_WMS_SNAPSHOT_COUNT=7                # 1 week of history
+export SAT_WMS_TILE_CACHE_DIR=/var/cache/sat-wms
+export SAT_WMS_TILE_CACHE_TTL_DAYS=7
+
+# Start for a 48-hour aggregation window
+uv run fastapi run src/sat_wms/app.py  # then request /48h/wmts/...
+```
+
+### Tile cache behaviour in stepped mode
+
+When a new SAR granule is ingested the "latest" timestamp shifts.  The next tile request for the new time triggers this logic:
+
+1. The server checks `_latest.txt` for the previous "latest" bucket.
+2. For each tile, it queries the DB for granules **added** (newer than the old latest) and **removed** (older than the new window start) that intersect the tile's bounding box.
+3. If neither set is non-empty, the old tile file is **hard-linked** to the new bucket key — no re-render, and the previous bucket tile remains accessible (same inode, no disk duplication).
+4. If data changed for this tile, the tile is re-rendered from scratch.
+
+For typical SAR orbital tracks covering a fraction of the polar domain, only a small fraction of cached tiles need re-rendering after each new granule.
 
 ---
 

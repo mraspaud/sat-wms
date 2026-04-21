@@ -240,3 +240,13 @@ def test_read_one_uses_bilinear_resampling():
 
     _, call_kwargs = mock_cog.part.call_args
     assert call_kwargs.get("resampling_method") == "bilinear"
+
+
+def test_read_one_missing_file_returns_none():
+    """_read_one returns None when the file does not exist on disk."""
+    from sat_wms.getmap import _read_one
+
+    _read_one.cache_clear()
+    result = _read_one("/nonexistent/missing.tiff", (-1000000, -2000000, 0, 0), "EPSG:3575", 256, 256)
+    assert result is None
+    _read_one.cache_clear()

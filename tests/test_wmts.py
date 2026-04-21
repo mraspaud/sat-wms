@@ -418,3 +418,146 @@ def test_registry_unknown_epsg_returns_none():
 
     build_registry(["EPSG:3857"])
     assert get_by_name("DoesNotExist") is None
+
+
+# ---------------------------------------------------------------------------
+# WMTS capabilities - stepped timestep mode
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_wmts_capabilities_stepped_mode_lists_discrete_times(local_mda):
+    """In 'stepped' mode the WMTS Dimension Value lists comma-separated ISO timestamps."""
+    import sat_wms.config as cfg
+    from sat_wms.wmts import generate_wmts_capabilities
+
+    with cfg.config.set({"timestep_mode": "stepped", "snapshot_step": "24h", "snapshot_count": 2}):
+        resp = await generate_wmts_capabilities(local_mda)
+    xml = resp.body.decode()
+    # No interval syntax
+    assert "Z/PT" not in xml
+    # Comma-separated timestamps present
+    assert xml.count("Z,") >= 1
+
+
+@pytest.mark.asyncio
+async def test_wmts_capabilities_stepped_mode_first_time_is_latest(local_mda):
+    """In 'stepped' mode the first listed time equals the layer's latest data time."""
+    import sat_wms.config as cfg
+    from sat_wms.wmts import generate_wmts_capabilities
+
+    with cfg.config.set({"timestep_mode": "stepped", "snapshot_step": "24h", "snapshot_count": 1}):
+        resp = await generate_wmts_capabilities(local_mda)
+    assert b"2026-03-24T05:34:29Z" in resp.body
+
+
+# ---------------------------------------------------------------------------
+# generate_tile - stepped timestep mode
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_generate_tile_stepped_mode_uses_exact_time_as_cache_key(tmp_path, synth_mda):
+    """In stepped mode the cache key is the exact requested time, not floor'd."""
+    from datetime import timedelta
+
+    import sat_wms.config as cfg
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    time_str = "2026-03-24T10:37:00Z"  # not on any 60-min boundary
+
+    with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
+        await generate_tile(synth_mda, **_TILE_KW, duration=timedelta(hours=6),
+                            time_str=time_str, fmt="PNG", interval_min=60)
+
+    # Cache file must use exact time (103700), not floored to 100000
+    from sat_wms.tile_cache import TileCache
+    cache = TileCache(cache_dir=str(tmp_path))
+    assert cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, "20260324T1037", "png") is not None
+    assert cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, "20260324T1000", "png") is None
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_stepped_mode_moves_tile_when_no_new_or_removed_data(tmp_path):
+    """In stepped mode, if no data was added or removed, the old tile is moved to new bucket."""
+    from datetime import datetime, timedelta, timezone
+
+    import sat_wms.config as cfg
+    from sat_wms.tile_cache import TileCache
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+
+    class StableMDA:
+        """MDA where no new or removed data affects the tile."""
+        async def get_latest_time(self, _layer):
+            return datetime(2026, 3, 24, 10, 37, tzinfo=timezone.utc)
+
+        async def get_map_assets(self, layer, bbox, start_dt, end_dt, src_srid):
+            # Return empty for both the "added" and "removed" window queries
+            return []
+
+    cache = TileCache(cache_dir=str(tmp_path))
+    old_bucket = "20260324T1000"
+    cache.put("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, old_bucket, "png", b"\x89PNG-old")
+    cache.set_latest("true_color_day", "NorthPolarLAEAEurope", old_bucket)
+
+    with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
+        await generate_tile(
+            StableMDA(), **_TILE_KW,
+            duration=timedelta(hours=6),
+            time_str="2026-03-24T10:37:00Z", fmt="PNG",
+        )
+
+    # Old tile should have been moved to new bucket
+    assert cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, "20260324T1037", "png") == b"\x89PNG-old"
+    # Old bucket still accessible (hard link, not rename)
+    assert cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, old_bucket, "png") == b"\x89PNG-old"
+
+
+# ---------------------------------------------------------------------------
+# Missing files on disk
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_read_tile_missing_file_returns_none():
+    """_read_tile returns None when the file is not found on disk."""
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import _read_tile
+
+    build_registry(["EPSG:3575"])
+    _read_tile.cache_clear()
+    result = _read_tile("/nonexistent/path/file.tiff", "NorthPolarLAEAEurope", 3, 4, 3)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_skips_missing_file_and_renders_rest(tmp_path, synth_mda):
+    """generate_tile renders a tile even when one of the matched files is missing on disk."""
+    from datetime import timedelta
+
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import _read_tile, generate_tile
+
+    build_registry(["EPSG:3575"])
+    _read_tile.cache_clear()
+
+    class MissingFileMDA:
+        """MDA returning one valid asset and one missing file."""
+        async def get_latest_time(self, _layer):
+            return None
+
+        async def get_map_assets(self, *_args, **_kwargs):
+            assets = await synth_mda.get_map_assets(*_args, **_kwargs)
+            return assets + [{"filename": "/nonexistent/missing.tiff",
+                               "bbox": assets[0]["bbox"] if assets else (0, 0, 1, 1)}]
+
+    resp = await generate_tile(
+        MissingFileMDA(), **_TILE_KW,
+        duration=timedelta(hours=6),
+        time_str="2026-03-24T06:00:00Z",
+    )
+    _read_tile.cache_clear()
+    assert resp.status_code == 200
+    assert resp.body[:4] == b"\x89PNG"

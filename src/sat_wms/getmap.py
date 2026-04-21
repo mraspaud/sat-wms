@@ -97,14 +97,20 @@ def _parse_params(params: dict) -> WmsParams:
 
 @functools.lru_cache(maxsize=config.get("tile_cache_entries"))
 def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
-    """Read a single GeoTIFF into an ImageData (runs in a thread)."""
+    """Read a single GeoTIFF into an ImageData (runs in a thread). Returns None if file is missing."""
+    import logging  # noqa: PLC0415
+
     import rasterio  # noqa: PLC0415
 
     dst = CRS.from_authority(*dst_crs.split(":"))
-    with rasterio.Env():
-        with COGReader(fp) as cog:
-            return cog.part(bbox, bounds_crs=dst, dst_crs=dst, width=width, height=height,
-                            resampling_method="bilinear")
+    try:
+        with rasterio.Env():
+            with COGReader(fp) as cog:
+                return cog.part(bbox, bounds_crs=dst, dst_crs=dst, width=width, height=height,
+                                resampling_method="bilinear")
+    except (OSError, rasterio.errors.RasterioIOError):
+        logging.getLogger(__name__).warning("File not found, skipping: %s", fp)
+        return None
 
 
 def _merge_sub(canvas, gaps, img, col_min, row_min, col_max, row_max):

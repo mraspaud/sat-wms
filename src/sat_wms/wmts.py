@@ -14,7 +14,7 @@ from rio_tiler.errors import TileOutsideBounds
 from sat_wms.config import config
 from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, cache_control, composite_images, empty_image
 from sat_wms.tile_cache import TileCache
-from sat_wms.time_utils import _to_iso_duration, ceil_dt, floor_dt
+from sat_wms.time_utils import _to_iso_duration, ceil_dt, compute_snapshot_times, floor_dt, parse_duration
 from sat_wms.tms_registry import all_tms, build_registry, get_by_name
 
 TYPE_CHECKING = False
@@ -38,15 +38,21 @@ def _ows_exception(msg: str, code: str) -> Response:
 @functools.lru_cache(maxsize=config.get("tile_cache_entries"))
 def _read_tile(fp: str, tms_id: str, x: int, y: int, z: int):
     """Read a 256×256 tile from a COG via COGReader.tile() (LRU-cached, runs in a thread)."""
+    import logging  # noqa: PLC0415
+
     import rasterio  # noqa: PLC0415
     from rio_tiler.io import COGReader  # noqa: PLC0415
 
-    with rasterio.Env():
-        with COGReader(fp, tms=get_by_name(tms_id)) as cog:
-            try:
-                return cog.tile(x, y, z, resampling_method="bilinear")
-            except TileOutsideBounds:
-                return None
+    try:
+        with rasterio.Env():
+            with COGReader(fp, tms=get_by_name(tms_id)) as cog:
+                try:
+                    return cog.tile(x, y, z, resampling_method="bilinear")
+                except TileOutsideBounds:
+                    return None
+    except (OSError, rasterio.errors.RasterioIOError):
+        logging.getLogger(__name__).warning("File not found, skipping: %s", fp)
+        return None
 
 
 def _tms_entry(tms: morecantile.TileMatrixSet, max_zoom: int) -> dict:
@@ -96,17 +102,25 @@ async def generate_wmts_capabilities(
     title = f"{base_title} ({duration_str})" if duration_str else base_title
 
     raw_layers = await mda.get_layers()
+    stepped = config.get("timestep_mode") == "stepped"
     layers = []
     for layer in raw_layers:
         lon_min, lat_min, lon_max, lat_max = _bbox_to_wgs84(layer["bbox"])
-        layers.append({
+        entry = {
             "layer_name": layer["layer_name"],
             "start_str": floor_dt(layer["start_time"], interval_min).strftime("%Y-%m-%dT%H:%M:00Z"),
             "end_str": layer["end_time"].strftime("%Y-%m-%dT%H:%M:%SZ"),
             "end_range_str": ceil_dt(layer["end_time"], interval_min).strftime("%Y-%m-%dT%H:%M:00Z"),
             "lon_min": lon_min, "lat_min": lat_min,
             "lon_max": lon_max, "lat_max": lat_max,
-        })
+            "time_values": None,
+        }
+        if stepped:
+            snapshot_step = parse_duration(config["snapshot_step"])
+            snapshot_count = int(config["snapshot_count"])
+            times = compute_snapshot_times(layer["end_time"], snapshot_step, snapshot_count)
+            entry["time_values"] = [t.strftime("%Y-%m-%dT%H:%M:%SZ") for t in times]
+        layers.append(entry)
 
     tms_entries = [_tms_entry(t, wmts_max_zoom) for t in all_tms()]
     tile_formats = ["image/webp"] if force_webp else ["image/png", "image/webp"]
@@ -148,6 +162,45 @@ async def _composite_tiles(filepaths: list[str], tms_id: str, x: int, y: int, z:
     return composite_images(images)
 
 
+async def _try_link_stepped_tile(
+    tile_cache: TileCache, mda, layer: str, tms_id: str,
+    z: int, y: int, x: int, ext: str,
+    time_bucket: str, end_dt: datetime, start_dt: datetime, duration: timedelta,
+    bbox_list: list, src_srid: int,
+) -> bytes | None:
+    """In stepped mode: if data in the tile window is unchanged, hard-link the old tile to the new bucket.
+
+    Returns the tile bytes on a successful link, or None to fall through to a full render.
+    """
+    prev_bucket = tile_cache.get_previous_latest(layer, tms_id)
+    if not prev_bucket or prev_bucket == time_bucket:
+        return None
+
+    prev_end_dt = datetime.strptime(prev_bucket, "%Y%m%dT%H%M").replace(tzinfo=timezone.utc)
+    old_window_start = prev_end_dt - duration
+
+    # Parallel queries: data newly added vs data that fell out of the window.
+    added, removed = await asyncio.gather(
+        mda.get_map_assets(layer, bbox_list, prev_end_dt, end_dt, src_srid=src_srid),
+        mda.get_map_assets(layer, bbox_list, old_window_start, start_dt, src_srid=src_srid),
+    )
+    if added or removed:
+        return None  # Data changed — fall through to full render.
+
+    if not tile_cache.link_tile(layer, tms_id, z, y, x, prev_bucket, time_bucket, ext):
+        return None  # No cached tile to link.
+
+    tile_cache.set_latest(layer, tms_id, time_bucket)
+    return tile_cache.get(layer, tms_id, z, y, x, time_bucket, ext)
+
+
+def _empty_response(fmt: str, media_type: str, headers: dict, empty_no_content: bool) -> Response:
+    """Return a 204 or transparent-image response for tiles with no renderable data."""
+    if empty_no_content:
+        return Response(status_code=204, headers=headers)
+    return Response(content=empty_image(256, 256, fmt), media_type=media_type, headers=headers)
+
+
 async def generate_tile(
     mda,
     layer: str,
@@ -185,7 +238,12 @@ async def generate_tile(
         else datetime.now(timezone.utc)
     )
     start_dt = end_dt - duration
-    time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
+
+    stepped = config.get("timestep_mode") == "stepped"
+    time_bucket = (
+        end_dt.strftime("%Y%m%dT%H%M") if stepped
+        else floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
+    )
 
     tile_cache = TileCache(
         cache_dir=config.get("tile_cache_dir"),
@@ -199,6 +257,15 @@ async def generate_tile(
     bbox_list = [bounds.left, bounds.bottom, bounds.right, bounds.top]
     src_srid = tms.crs.to_epsg()
 
+    # In stepped mode: hard-link old tile to new bucket if data is unchanged.
+    if stepped:
+        linked = await _try_link_stepped_tile(
+            tile_cache, mda, layer, tms_id, z, y, x, ext,
+            time_bucket, end_dt, start_dt, duration, bbox_list, src_srid,
+        )
+        if linked is not None:
+            return Response(content=linked, media_type=media_type)
+
     latest, assets = await asyncio.gather(
         mda.get_latest_time(layer),
         mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
@@ -207,9 +274,7 @@ async def generate_tile(
     headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
 
     if not assets:
-        if empty_no_content:
-            return Response(status_code=204, headers=headers)
-        return Response(content=empty_image(256, 256, fmt), media_type=media_type, headers=headers)
+        return _empty_response(fmt, media_type, headers, empty_no_content)
 
     filepaths = [a["filename"] for a in assets]
 
@@ -217,9 +282,7 @@ async def generate_tile(
         result = await _composite_tiles(filepaths, tms_id, x, y, z)
 
         if result is None:
-            if empty_no_content:
-                return Response(status_code=204, headers=headers)
-            return Response(content=empty_image(256, 256, fmt), media_type=media_type, headers=headers)
+            return _empty_response(fmt, media_type, headers, empty_no_content)
 
         render_kwargs = {"img_format": fmt} if fmt != "PNG" else {"img_format": "PNG", "zlevel": 1}
         image = await asyncio.get_running_loop().run_in_executor(
@@ -227,4 +290,6 @@ async def generate_tile(
         )
 
     tile_cache.put(layer, tms_id, z, y, x, time_bucket, ext, image)
+    if stepped:
+        tile_cache.set_latest(layer, tms_id, time_bucket)
     return Response(content=image, media_type=media_type, headers=headers)
