@@ -618,3 +618,151 @@ async def test_generate_tile_skips_missing_file_and_renders_rest(tmp_path, synth
     _read_tile.cache_clear()
     assert resp.status_code == 200
     assert resp.body[:4] == b"\x89PNG"
+
+
+# ---------------------------------------------------------------------------
+# Stepped mode Cache-Control headers
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_generate_tile_stepped_cache_hit_last_step_has_short_ttl(tmp_path):
+    """Disk-cache hit for the last (moving) step returns Cache-Control max-age=60."""
+    from datetime import datetime, timezone
+
+    import sat_wms.config as cfg
+    from sat_wms.tile_cache import TileCache
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    latest_time = datetime(2026, 4, 21, 14, 37, tzinfo=timezone.utc)
+
+    cache = TileCache(cache_dir=str(tmp_path))
+    cache.put("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, "20260421T1437", "png", b"\x89PNG-cached")
+
+    class LatestMDA:
+        async def get_latest_time(self, _layer):
+            return latest_time
+
+        async def get_map_assets(self, *_args, **_kwargs):
+            return []
+
+    with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
+        resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
+                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", interval_min=10)
+
+    assert resp.headers["cache-control"] == "public, max-age=60, stale-while-revalidate=60"
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_stepped_cache_hit_snapshot_has_long_ttl(tmp_path):
+    """Disk-cache hit for a historical snapshot returns Cache-Control max-age=86400, immutable."""
+    from datetime import datetime, timezone
+
+    import sat_wms.config as cfg
+    from sat_wms.tile_cache import TileCache
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    latest_time = datetime(2026, 4, 21, 14, 37, tzinfo=timezone.utc)
+
+    cache = TileCache(cache_dir=str(tmp_path))
+    cache.put("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, "20260421T0000", "png", b"\x89PNG-snap")
+
+    class LatestMDA:
+        async def get_latest_time(self, _layer):
+            return latest_time
+
+        async def get_map_assets(self, *_args, **_kwargs):
+            return []
+
+    with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
+        resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
+                                   time_str="2026-04-21T00:00:00Z", fmt="PNG", interval_min=10)
+
+    assert resp.headers["cache-control"] == "public, max-age=86400, immutable"
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_stepped_linked_tile_has_short_ttl(tmp_path):
+    """Linked tile (unchanged data) for the last step returns Cache-Control max-age=60."""
+    from datetime import datetime, timedelta, timezone
+
+    import sat_wms.config as cfg
+    from sat_wms.tile_cache import TileCache
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    latest_time = datetime(2026, 4, 21, 14, 37, tzinfo=timezone.utc)
+
+    cache = TileCache(cache_dir=str(tmp_path))
+    old_bucket = "20260421T1400"
+    cache.put("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, old_bucket, "png", b"\x89PNG-old")
+    cache.set_latest("true_color_day", "NorthPolarLAEAEurope", old_bucket)
+
+    class StableMDA:
+        async def get_latest_time(self, _layer):
+            return latest_time
+
+        async def get_map_assets(self, *_args, **_kwargs):
+            return []
+
+    with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
+        resp = await generate_tile(StableMDA(), **_TILE_KW, duration=timedelta(hours=24),
+                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", interval_min=10)
+
+    assert resp.headers["cache-control"] == "public, max-age=60, stale-while-revalidate=60"
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_stepped_no_content_last_step_has_short_ttl():
+    """No-content response for the last step in stepped mode returns Cache-Control max-age=60."""
+    from datetime import datetime, timezone
+
+    import sat_wms.config as cfg
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    latest_time = datetime(2026, 4, 21, 14, 37, tzinfo=timezone.utc)
+
+    class LatestMDA:
+        async def get_latest_time(self, _layer):
+            return latest_time
+
+        async def get_map_assets(self, *_args, **_kwargs):
+            return []
+
+    with cfg.config.set({"timestep_mode": "stepped"}):
+        resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
+                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", interval_min=10)
+
+    assert resp.headers["cache-control"] == "public, max-age=60, stale-while-revalidate=60"
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_stepped_no_content_snapshot_has_long_ttl():
+    """No-content response for a historical snapshot in stepped mode returns Cache-Control max-age=86400."""
+    from datetime import datetime, timezone
+
+    import sat_wms.config as cfg
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    latest_time = datetime(2026, 4, 21, 14, 37, tzinfo=timezone.utc)
+
+    class LatestMDA:
+        async def get_latest_time(self, _layer):
+            return latest_time
+
+        async def get_map_assets(self, *_args, **_kwargs):
+            return []
+
+    with cfg.config.set({"timestep_mode": "stepped"}):
+        resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
+                                   time_str="2026-04-21T00:00:00Z", fmt="PNG", interval_min=10)
+
+    assert resp.headers["cache-control"] == "public, max-age=86400, immutable"

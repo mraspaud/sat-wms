@@ -270,9 +270,17 @@ async def generate_tile(
         cache_dir=config.get("tile_cache_dir"),
         ttl_days=config.get("tile_cache_ttl_days"),
     )
+
+    # In stepped mode fetch latest upfront so all return paths can set Cache-Control.
+    if stepped:
+        latest = await mda.get_latest_time(layer)
+        headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
+    else:
+        headers = {}
+
     cached = tile_cache.get(layer, tms_id, z, y, x, time_bucket, ext)
     if cached is not None:
-        return Response(content=cached, media_type=media_type)
+        return Response(content=cached, media_type=media_type, headers=headers)
 
     bounds = tms.xy_bounds(morecantile.Tile(x, y, z))
     bbox_list = [bounds.left, bounds.bottom, bounds.right, bounds.top]
@@ -285,14 +293,16 @@ async def generate_tile(
             time_bucket, end_dt, start_dt, duration, bbox_list, src_srid,
         )
         if linked is not None:
-            return Response(content=linked, media_type=media_type)
+            return Response(content=linked, media_type=media_type, headers=headers)
 
-    latest, assets = await asyncio.gather(
-        mda.get_latest_time(layer),
-        mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
-    )
-
-    headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
+    if stepped:
+        assets = await mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid)
+    else:
+        latest, assets = await asyncio.gather(
+            mda.get_latest_time(layer),
+            mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
+        )
+        headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
 
     if not assets:
         return _empty_response(fmt, media_type, headers, empty_no_content)

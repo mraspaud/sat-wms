@@ -1065,6 +1065,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "rasterio" },
+    { name = "trollsift" },
 ]
 scripts = [
     { name = "rasterio" },
@@ -1089,6 +1090,7 @@ dev = [
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "rasterio", specifier = ">=1.5.0" },
+    { name = "trollsift", specifier = ">=1.0.0" },
 ]
 scripts = [
     { name = "rasterio", specifier = ">=1.5.0" },
