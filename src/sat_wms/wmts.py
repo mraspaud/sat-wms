@@ -61,7 +61,7 @@ def _read_tile(fp: str, tms_id: str, x: int, y: int, z: int):
                 if gcps:
                     dataset = stack.enter_context(
                         WarpedVRT(src, src_crs=gcp_crs, src_transform=from_gcps(gcps),
-                                  crs=tms.crs, resampling=Resampling.bilinear)
+                                  crs=tms.crs, resampling=Resampling.bilinear, add_alpha=True)
                     )
                 else:
                     dataset = src

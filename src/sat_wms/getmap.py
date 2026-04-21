@@ -115,7 +115,7 @@ def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
                 if gcps:
                     dataset = stack.enter_context(
                         WarpedVRT(src, src_crs=gcp_crs, src_transform=from_gcps(gcps),
-                                  crs=dst, resampling=Resampling.bilinear)
+                                  crs=dst, resampling=Resampling.bilinear, add_alpha=True)
                     )
                 else:
                     dataset = src
