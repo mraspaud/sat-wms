@@ -292,3 +292,13 @@ def test_read_one_gcp_file_pre_wraps_to_dst_crs(tmp_path):
 
     assert captured_crs, "WarpedVRT was not called — GCP file must be pre-wrapped"
     assert captured_crs[0] == CRS.from_epsg(3575)
+
+
+@pytest.mark.asyncio
+async def test_generate_map_comma_separated_time_uses_latest(synth_mda):
+    """A comma-separated TIME list (as sent by QGIS) uses the latest timestamp."""
+    from sat_wms.getmap import generate_map
+
+    params = {**VALID_PARAMS, "TIME": "2026-03-20T12:00:00Z,2026-03-21T00:00:00Z,2026-03-24T05:04:00Z"}
+    res = await generate_map(synth_mda, params, timedelta(hours=72))
+    assert res.status_code == 200

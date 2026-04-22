@@ -3,7 +3,7 @@ import asyncio
 import dataclasses
 import functools
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import numpy as np
 import pyproj
@@ -14,6 +14,7 @@ from rio_tiler.models import ImageData
 
 from sat_wms.config import config
 from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, TILE_FORMATS, cache_control, empty_image
+from sat_wms.time_utils import parse_end_time
 
 
 class WmsRequestError(ValueError):
@@ -108,14 +109,7 @@ def _parse_params(params: dict) -> WmsParams:
         raise WmsRequestError(f"WIDTH and HEIGHT must not exceed {max_pixels} pixels.")
 
     time_str = params.get("TIME")
-    try:
-        time = (
-            datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-            if time_str
-            else datetime.now(timezone.utc)
-        )
-    except ValueError as exc:
-        raise WmsRequestError(f"Invalid TIME parameter: {exc}") from exc
+    time = parse_end_time(time_str)
 
     fmt = TILE_FORMATS.get(params.get("FORMAT", "").lower(), "PNG")
     return WmsParams(layer_name=layer_name, bbox=bbox, crs=crs, srid=srid,

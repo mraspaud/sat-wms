@@ -1,6 +1,6 @@
 """Time utility functions."""
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 _DURATION_RE = re.compile(r"(\d+)(m|h|d)")
 
@@ -61,3 +61,15 @@ def ceil_dt(dt: datetime, interval_min: int = 10) -> datetime:
     if dt.minute % interval_min == 0 and dt.second == 0 and dt.microsecond == 0:
         return floored
     return floored + timedelta(minutes=interval_min)
+
+
+def parse_end_time(time_str: str | None) -> datetime:
+    """Parse a WMS/WMTS TIME parameter string into the end datetime.
+
+    Returns the latest timestamp when the value is comma-separated (as sent by QGIS),
+    the single parsed timestamp when only one is given, or now() if absent.
+    """
+    if time_str is None:
+        return datetime.now(timezone.utc)
+    timestamps = [t.strip() for t in time_str.split(",")]
+    return max(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in timestamps)

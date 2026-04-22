@@ -2,7 +2,7 @@
 import asyncio
 import functools
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from importlib.resources import files
 
 import morecantile
@@ -16,7 +16,14 @@ from sat_wms.config import config, get_supported_crs
 from sat_wms.postgis_utils import parse_postgis_box
 from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, cache_control, composite_images, empty_image
 from sat_wms.tile_cache import TileCache
-from sat_wms.time_utils import _to_iso_duration, ceil_dt, compute_snapshot_times, floor_dt, parse_duration
+from sat_wms.time_utils import (
+    _to_iso_duration,
+    ceil_dt,
+    compute_snapshot_times,
+    floor_dt,
+    parse_duration,
+    parse_end_time,
+)
 from sat_wms.tms_registry import all_tms, build_registry, get_by_name
 
 TYPE_CHECKING = False
@@ -267,11 +274,7 @@ async def generate_tile(
     media_type = MEDIA_TYPES[fmt]
     ext = fmt.lower()
 
-    end_dt = (
-        datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-        if time_str
-        else datetime.now(timezone.utc)
-    )
+    end_dt = parse_end_time(time_str)
     start_dt = end_dt - duration
     time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
 

@@ -809,3 +809,17 @@ async def test_generate_tile_stepped_out_of_order_granule_rerenders(tmp_path):
     # both requests hit the DB.  With old time-bucket key: second call is a disk cache
     # hit that skips the DB entirely — call_count stays at 1.
     assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_comma_separated_time_uses_latest(synth_mda):
+    """A comma-separated TIME list (as sent by QGIS) uses the latest timestamp."""
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    resp = await generate_tile(
+        synth_mda, **_TILE_KW, duration=timedelta(hours=72),
+        time_str="2026-03-20T12:00:00Z,2026-03-21T00:00:00Z,2026-03-24T06:00:00Z",
+    )
+    assert resp.status_code == 200

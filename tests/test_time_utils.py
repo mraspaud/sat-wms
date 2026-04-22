@@ -1,7 +1,7 @@
 """Tests for time utility functions."""
 from datetime import datetime, timedelta, timezone
 
-from sat_wms.time_utils import compute_snapshot_times
+from sat_wms.time_utils import compute_snapshot_times, parse_end_time
 
 
 def test_compute_snapshot_times_sorted_ascending():
@@ -52,3 +52,9 @@ def test_compute_snapshot_times_12h_step():
     assert times[1] == datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc)
     assert times[2] == datetime(2026, 4, 21, 0, 0, tzinfo=timezone.utc)
     assert times[3] == latest
+
+
+def test_parse_end_time_comma_separated_returns_latest():
+    """A comma-separated TIME string returns the latest (max) timestamp."""
+    result = parse_end_time("2026-04-18T12:00:00Z,2026-04-20T00:00:00Z,2026-04-19T06:00:00Z")
+    assert result == datetime(2026, 4, 20, 0, 0, tzinfo=timezone.utc)
