@@ -511,68 +511,6 @@ async def test_wmts_capabilities_layer_name_prefix_applied(local_mda):
 
 
 
-@pytest.mark.asyncio
-async def test_generate_tile_stepped_mode_uses_exact_time_as_cache_key(tmp_path, synth_mda):
-    """In stepped mode the cache key is the exact requested time, not floor'd."""
-    from datetime import timedelta
-
-    import sat_wms.config as cfg
-    from sat_wms.tms_registry import build_registry
-    from sat_wms.wmts import generate_tile
-
-    build_registry(["EPSG:3575"])
-    time_str = "2026-03-24T10:37:00Z"  # not on any 60-min boundary
-
-    with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
-        await generate_tile(synth_mda, **_TILE_KW, duration=timedelta(hours=6),
-                            time_str=time_str, fmt="PNG", interval_min=60)
-
-    # Cache file must use exact time (103700), not floored to 100000
-    from sat_wms.tile_cache import TileCache
-    cache = TileCache(cache_dir=str(tmp_path))
-    assert cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, "20260324T1037", "png") is not None
-    assert cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, "20260324T1000", "png") is None
-
-
-@pytest.mark.asyncio
-async def test_generate_tile_stepped_mode_moves_tile_when_no_new_or_removed_data(tmp_path):
-    """In stepped mode, if no data was added or removed, the old tile is moved to new bucket."""
-    from datetime import datetime, timedelta, timezone
-
-    import sat_wms.config as cfg
-    from sat_wms.tile_cache import TileCache
-    from sat_wms.tms_registry import build_registry
-    from sat_wms.wmts import generate_tile
-
-    build_registry(["EPSG:3575"])
-
-    class StableMDA:
-        """MDA where no new or removed data affects the tile."""
-        async def get_latest_time(self, _layer):
-            return datetime(2026, 3, 24, 10, 37, tzinfo=timezone.utc)
-
-        async def get_map_assets(self, layer, bbox, start_dt, end_dt, src_srid):
-            # Return empty for both the "added" and "removed" window queries
-            return []
-
-    cache = TileCache(cache_dir=str(tmp_path))
-    old_bucket = "20260324T1000"
-    cache.put("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, old_bucket, "png", b"\x89PNG-old")
-    cache.set_latest("true_color_day", "NorthPolarLAEAEurope", old_bucket)
-
-    with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
-        await generate_tile(
-            StableMDA(), **_TILE_KW,
-            duration=timedelta(hours=6),
-            time_str="2026-03-24T10:37:00Z", fmt="PNG",
-        )
-
-    # Old tile should have been moved to new bucket
-    assert cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, "20260324T1037", "png") == b"\x89PNG-old"
-    # Old bucket still accessible (hard link, not rename)
-    assert cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, old_bucket, "png") == b"\x89PNG-old"
-
-
 # ---------------------------------------------------------------------------
 # Missing files on disk
 # ---------------------------------------------------------------------------
@@ -683,39 +621,6 @@ async def test_generate_tile_stepped_cache_hit_snapshot_has_long_ttl(tmp_path):
 
     assert resp.headers["cache-control"] == "public, max-age=86400, immutable"
 
-
-@pytest.mark.asyncio
-async def test_generate_tile_stepped_linked_tile_has_short_ttl(tmp_path):
-    """Linked tile (unchanged data) for the last step returns Cache-Control max-age=60."""
-    from datetime import datetime, timedelta, timezone
-
-    import sat_wms.config as cfg
-    from sat_wms.tile_cache import TileCache
-    from sat_wms.tms_registry import build_registry
-    from sat_wms.wmts import generate_tile
-
-    build_registry(["EPSG:3575"])
-    latest_time = datetime(2026, 4, 21, 14, 37, tzinfo=timezone.utc)
-
-    cache = TileCache(cache_dir=str(tmp_path))
-    old_bucket = "20260421T1400"
-    cache.put("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, old_bucket, "png", b"\x89PNG-old")
-    cache.set_latest("true_color_day", "NorthPolarLAEAEurope", old_bucket)
-
-    class StableMDA:
-        async def get_latest_time(self, _layer):
-            return latest_time
-
-        async def get_map_assets(self, *_args, **_kwargs):
-            return []
-
-    with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
-        resp = await generate_tile(StableMDA(), **_TILE_KW, duration=timedelta(hours=24),
-                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", interval_min=10)
-
-    assert resp.headers["cache-control"] == "public, max-age=60, stale-while-revalidate=60"
-
-
 @pytest.mark.asyncio
 async def test_generate_tile_stepped_no_content_last_step_has_short_ttl():
     """No-content response for the last step in stepped mode returns Cache-Control max-age=60."""
@@ -766,3 +671,103 @@ async def test_generate_tile_stepped_no_content_snapshot_has_long_ttl():
                                    time_str="2026-04-21T00:00:00Z", fmt="PNG", interval_min=10)
 
     assert resp.headers["cache-control"] == "public, max-age=86400, immutable"
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_stepped_latest_step_short_ttl_with_microsecond_latest():
+    """In stepped mode, the latest step gets short TTL even when DB returns a tz-naive datetime.
+
+    The DB schema stores 'timestamp without time zone'; psycopg3 returns tz-naive datetimes.
+    The client's end_dt is tz-aware (UTC). floor_dt(naive) == floor_dt(aware) is always False
+    in Python, causing every tile to get 'immutable'. The fix: strip tz from end_dt before
+    comparing, or make latest tz-aware before comparing.
+    """
+    from datetime import datetime, timezone
+
+    import sat_wms.config as cfg
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    # Simulate DB returning a tz-naive datetime (timestamp without time zone)
+    latest_time = datetime(2026, 4, 21, 14, 37, 0)  # tz-naive
+
+    class LatestMDA:
+        async def get_latest_time(self, _layer):
+            return latest_time
+
+        async def get_map_assets(self, *_args, **_kwargs):
+            return []
+
+    with cfg.config.set({"timestep_mode": "stepped"}):
+        # time_str produces a tz-aware end_dt; latest is tz-naive → comparison breaks
+        resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
+                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", interval_min=10)
+
+    assert resp.headers["cache-control"] == "public, max-age=60, stale-while-revalidate=60"
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_stepped_out_of_order_granule_rerenders(tmp_path):
+    """In stepped mode, disk cache is keyed by file list.
+
+    When a new file arrives for the same time step, the DB must be re-queried and
+    the tile re-rendered — not served from a stale disk-cache hit keyed by time_bucket.
+    """
+    import numpy as np
+    import rasterio
+    from datetime import datetime, timedelta, timezone
+    from rasterio.crs import CRS
+    from rasterio.transform import from_bounds
+
+    import sat_wms.config as cfg
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import _read_tile, generate_tile
+
+    build_registry(["EPSG:3575"])
+    _read_tile.cache_clear()
+
+    def make_tif(path, r, g, b):
+        data = np.zeros((4, 10, 10), dtype=np.uint8)
+        data[0] = r; data[1] = g; data[2] = b; data[3] = 255
+        transform = from_bounds(-1320000, -2781000, 569250, 245250, 10, 10)
+        with rasterio.open(
+            path, "w", driver="GTiff", height=10, width=10, count=4, dtype=np.uint8,
+            crs=CRS.from_epsg(3575), transform=transform,
+        ) as dst:
+            dst.write(data)
+
+    f1 = str(tmp_path / "tile_f1.tif")
+    f2 = str(tmp_path / "tile_f2.tif")
+    make_tif(f1, 200, 0, 0)
+    make_tif(f2, 0, 200, 0)
+    bbox = (-1320000.0, -2781000.0, 569250.0, 245250.0)
+
+    call_count = 0
+
+    class OutOfOrderMDA:
+        async def get_latest_time(self, _layer):
+            return datetime(2026, 3, 24, 10, 37, tzinfo=timezone.utc)
+
+        async def get_map_assets(self, *_a, **_kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [{"filename": f1, "bbox": bbox, "bbox_srid": 3575}]
+            return [
+                {"filename": f1, "bbox": bbox, "bbox_srid": 3575},
+                {"filename": f2, "bbox": bbox, "bbox_srid": 3575},
+            ]
+
+    mda = OutOfOrderMDA()
+    with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
+        await generate_tile(mda, **_TILE_KW, duration=timedelta(hours=6),
+                            time_str="2026-03-24T10:37:00Z")
+        await generate_tile(mda, **_TILE_KW, duration=timedelta(hours=6),
+                            time_str="2026-03-24T10:37:00Z")
+    _read_tile.cache_clear()
+
+    # With file-list key: get_map_assets is always called before the cache check, so
+    # both requests hit the DB.  With old time-bucket key: second call is a disk cache
+    # hit that skips the DB entirely — call_count stays at 1.
+    assert call_count == 2

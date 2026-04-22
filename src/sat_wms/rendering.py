@@ -58,8 +58,17 @@ def empty_image(width: int, height: int, img_format: str) -> bytes:
 
 
 def cache_control(latest: datetime | None, end_dt: datetime, interval_min: int) -> str:
-    """Return an appropriate Cache-Control header value."""
-    is_latest = latest is not None and floor_dt(latest, interval_min) == floor_dt(end_dt, interval_min)
+    """Return an appropriate Cache-Control header value.
+
+    Works correctly whether `latest` is tz-aware or tz-naive (the DB schema stores
+    ``timestamp without time zone``, so psycopg3 returns tz-naive datetimes).
+    """
+    if latest is None:
+        return "public, max-age=86400, immutable"
+    # Normalise: strip tz info from both sides so the comparison is always apples-to-apples.
+    latest_naive = latest.replace(tzinfo=None)
+    end_dt_naive = end_dt.replace(tzinfo=None)
+    is_latest = floor_dt(latest_naive, interval_min) == floor_dt(end_dt_naive, interval_min)
     return "public, max-age=60, stale-while-revalidate=60" if is_latest else "public, max-age=86400, immutable"
 
 

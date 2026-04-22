@@ -1,6 +1,7 @@
 """WMTS 1.0.0 request handlers."""
 import asyncio
 import functools
+import hashlib
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 
@@ -183,37 +184,6 @@ async def _composite_tiles(filepaths: list[str], tms_id: str, x: int, y: int, z:
     return composite_images(images)
 
 
-async def _try_link_stepped_tile(
-    tile_cache: TileCache, mda, layer: str, tms_id: str,
-    z: int, y: int, x: int, ext: str,
-    time_bucket: str, end_dt: datetime, start_dt: datetime, duration: timedelta,
-    bbox_list: list, src_srid: int,
-) -> bytes | None:
-    """In stepped mode: if data in the tile window is unchanged, hard-link the old tile to the new bucket.
-
-    Returns the tile bytes on a successful link, or None to fall through to a full render.
-    """
-    prev_bucket = tile_cache.get_previous_latest(layer, tms_id)
-    if not prev_bucket or prev_bucket == time_bucket:
-        return None
-
-    prev_end_dt = datetime.strptime(prev_bucket, "%Y%m%dT%H%M").replace(tzinfo=timezone.utc)
-    old_window_start = prev_end_dt - duration
-
-    # Parallel queries: data newly added vs data that fell out of the window.
-    added, removed = await asyncio.gather(
-        mda.get_map_assets(layer, bbox_list, prev_end_dt, end_dt, src_srid=src_srid),
-        mda.get_map_assets(layer, bbox_list, old_window_start, start_dt, src_srid=src_srid),
-    )
-    if added or removed:
-        return None  # Data changed — fall through to full render.
-
-    if not tile_cache.link_tile(layer, tms_id, z, y, x, prev_bucket, time_bucket, ext):
-        return None  # No cached tile to link.
-
-    tile_cache.set_latest(layer, tms_id, time_bucket)
-    return tile_cache.get(layer, tms_id, z, y, x, time_bucket, ext)
-
 
 def _empty_response(fmt: str, media_type: str, headers: dict, empty_no_content: bool) -> Response:
     """Return a 204 or transparent-image response for tiles with no renderable data."""
@@ -261,48 +231,40 @@ async def generate_tile(
     start_dt = end_dt - duration
 
     stepped = config.get("timestep_mode") == "stepped"
-    time_bucket = (
-        end_dt.strftime("%Y%m%dT%H%M") if stepped
-        else floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
-    )
+    time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
 
     tile_cache = TileCache(
         cache_dir=config.get("tile_cache_dir"),
         ttl_days=config.get("tile_cache_ttl_days"),
     )
 
-    # In stepped mode fetch latest upfront so all return paths can set Cache-Control.
-    if stepped:
-        latest = await mda.get_latest_time(layer)
-        headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
-    else:
-        headers = {}
-
-    cached = tile_cache.get(layer, tms_id, z, y, x, time_bucket, ext)
-    if cached is not None:
-        return Response(content=cached, media_type=media_type, headers=headers)
-
     bounds = tms.xy_bounds(morecantile.Tile(x, y, z))
     bbox_list = [bounds.left, bounds.bottom, bounds.right, bounds.top]
     src_srid = tms.crs.to_epsg()
 
-    # In stepped mode: hard-link old tile to new bucket if data is unchanged.
     if stepped:
-        linked = await _try_link_stepped_tile(
-            tile_cache, mda, layer, tms_id, z, y, x, ext,
-            time_bucket, end_dt, start_dt, duration, bbox_list, src_srid,
-        )
-        if linked is not None:
-            return Response(content=linked, media_type=media_type, headers=headers)
-
-    if stepped:
-        assets = await mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid)
-    else:
+        # Fetch latest and assets upfront: we need the file list to build a correct
+        # cache key, so new out-of-order granules in the same time window are not ignored.
         latest, assets = await asyncio.gather(
             mda.get_latest_time(layer),
             mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
         )
         headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
+        files_key = hashlib.sha1("|".join(sorted(a["filename"] for a in assets)).encode()).hexdigest()[:16]  # noqa: S324
+        cached = tile_cache.get(layer, tms_id, z, y, x, files_key, ext)
+        if cached is not None:
+            return Response(content=cached, media_type=media_type, headers=headers)
+    else:
+        headers = {}
+        cached = tile_cache.get(layer, tms_id, z, y, x, time_bucket, ext)
+        if cached is not None:
+            return Response(content=cached, media_type=media_type, headers=headers)
+        latest, assets = await asyncio.gather(
+            mda.get_latest_time(layer),
+            mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
+        )
+        headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
+        files_key = time_bucket
 
     if not assets:
         return _empty_response(fmt, media_type, headers, empty_no_content)
@@ -320,7 +282,5 @@ async def generate_tile(
             None, functools.partial(result.render, **render_kwargs)
         )
 
-    tile_cache.put(layer, tms_id, z, y, x, time_bucket, ext, image)
-    if stepped:
-        tile_cache.set_latest(layer, tms_id, time_bucket)
+    tile_cache.put(layer, tms_id, z, y, x, files_key, ext, image)
     return Response(content=image, media_type=media_type, headers=headers)

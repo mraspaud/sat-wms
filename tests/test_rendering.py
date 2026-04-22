@@ -103,3 +103,36 @@ def test_composite_retains_remaining_mask():
     # Columns 0-1 filled by img1, columns 2-3 still masked
     assert not np.any(result.array.mask[:, :, :2])
     assert np.all(result.array.mask[:, :, 2:])
+
+
+def test_cache_control_tz_naive_latest_gives_short_ttl():
+    """cache_control() works when 'latest' is tz-naive (psycopg3 returns tz-naive for timestamp columns).
+
+    The DB schema uses 'timestamp without time zone'; psycopg3 returns tz-naive datetimes.
+    end_dt (parsed from the WMS Time= parameter) is tz-aware. Without normalization,
+    floor_dt(naive) == floor_dt(aware) is always False in Python, so every tile gets
+    'immutable' instead of the short TTL for the latest step.
+    """
+    from datetime import datetime, timezone
+
+    from sat_wms.rendering import cache_control
+
+    # Simulate what psycopg3 returns for a 'timestamp without time zone' column
+    latest_naive = datetime(2026, 4, 22, 7, 58, 38)         # tz-naive (from DB)
+    end_dt_aware = datetime(2026, 4, 22, 7, 58, 38, tzinfo=timezone.utc)  # tz-aware (from request)
+
+    assert cache_control(latest_naive, end_dt_aware, interval_min=5) == \
+        "public, max-age=60, stale-while-revalidate=60"
+
+
+def test_cache_control_tz_naive_snapshot_gives_long_ttl():
+    """Historical snapshot correctly returns long TTL even with tz-naive latest."""
+    from datetime import datetime, timezone
+
+    from sat_wms.rendering import cache_control
+
+    latest_naive = datetime(2026, 4, 22, 7, 58, 38)         # tz-naive (from DB)
+    snapshot_aware = datetime(2026, 4, 22, 0, 0, 0, tzinfo=timezone.utc)  # midnight snapshot
+
+    assert cache_control(latest_naive, snapshot_aware, interval_min=5) == \
+        "public, max-age=86400, immutable"
