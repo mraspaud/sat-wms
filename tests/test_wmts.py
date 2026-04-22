@@ -504,6 +504,64 @@ async def test_wmts_capabilities_respects_string_config_without_supported_crs_pa
     assert "NorthPolarLAEAEurope" not in xml
 
 
+@pytest.mark.asyncio
+async def test_epsg3301_topleftcorner_is_in_crs_native_axis_order(local_mda):
+    """TopLeftCorner for EPSG:3301 must be in CRS-native (north, east) order.
+
+    EPSG:3301 has axes (X=Northing, Y=Easting), so TopLeftCorner must be
+    (northing_max, easting_min) — NOT morecantile's internal always_xy order
+    (easting_min, northing_max).  Providing the values swapped causes QGIS to
+    misinterpret the tile origin and show no data.
+    """
+    import sat_wms.config as cfg
+    from sat_wms.wmts import generate_wmts_capabilities
+
+    with cfg.config.set({"supported_crs": "EPSG:3301"}):
+        resp = await generate_wmts_capabilities(local_mda)
+    xml = resp.body.decode()
+
+    # Extract the TopLeftCorner value for the EPSG:3301 TileMatrixSet.
+    import re
+    # The EPSG3301 TileMatrixSet block contains TopLeftCorner entries; grab the first.
+    match = re.search(r"<TopLeftCorner>([\d.e+\- ]+)</TopLeftCorner>", xml)
+    assert match, "No TopLeftCorner found in capabilities"
+    first, second = (float(v) for v in match.group(1).split())
+    # In CRS-native (north, east) order the northing is first.
+    # Estonia northing_max ≈ 6,658,861 m; easting_min ≈ 282,560 m.
+    # So the first value must be the larger northing, not the smaller easting.
+    assert first > second, (
+        f"TopLeftCorner appears to be in always_xy (east, north) order: ({first}, {second}). "
+        "Expected CRS-native (north, east) order: northing first (large), easting second (small)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_epsg3575_topleftcorner_stays_in_standard_order(local_mda):
+    """TopLeftCorner for EPSG:3575 (NorthPolarLAEAEurope) must stay in standard (east, north) order.
+
+    EPSG:3575 axes are (Easting, Northing) — standard XY — so morecantile's
+    output is already correct.  This guards against accidentally swapping it.
+    """
+    import re
+
+    import sat_wms.config as cfg
+    from sat_wms.wmts import generate_wmts_capabilities
+
+    with cfg.config.set({"supported_crs": "EPSG:3575"}):
+        resp = await generate_wmts_capabilities(local_mda)
+    xml = resp.body.decode()
+
+    # The NorthPolarLAEAEurope TMS uses a square extent; TopLeftCorner at zoom 0
+    # is (-5400000.0, 5400000.0) — easting (negative) then northing (positive).
+    match = re.search(r"<TopLeftCorner>([-\d.e+ ]+)</TopLeftCorner>", xml)
+    assert match, "No TopLeftCorner found for EPSG:3575"
+    first, second = (float(v) for v in match.group(1).split())
+    # Easting is first (−5 400 000), northing is second (+5 400 000).
+    assert first < 0 < second, (
+        f"EPSG:3575 TopLeftCorner unexpectedly swapped: ({first}, {second})"
+    )
+
+
 # ---------------------------------------------------------------------------
 # WMTS capabilities - stepped timestep mode
 # ---------------------------------------------------------------------------

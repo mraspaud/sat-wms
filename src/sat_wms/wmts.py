@@ -88,14 +88,21 @@ def _tms_entry(tms: morecantile.TileMatrixSet, max_zoom: int) -> dict:
     """Serialise a TileMatrixSet into a template-friendly dict."""
     # OGC URN format: OpenLayers resolves this via ol/proj; the HTTP URI form is not recognised.
     crs_uri = f"urn:ogc:def:crs:EPSG::{tms.crs.to_epsg()}"
+    # Detect CRS with non-standard axis order (first axis = northing, e.g. EPSG:3301).
+    # OGC WMTS spec requires TopLeftCorner in CRS-native axis order, but morecantile
+    # always outputs pointOfOrigin in (east, north) order for projected CRS.
+    pyproj_crs = pyproj.CRS.from_epsg(tms.crs.to_epsg())
+    crs_axes_north_first = pyproj_crs.axis_info[0].direction == "north"
     matrices = []
     for z in range(tms.minzoom, min(tms.maxzoom, max_zoom) + 1):
         m = tms.matrix(z)
         ox, oy = m.pointOfOrigin
+        # Swap to CRS-native (north, east) order when the CRS has northing as its first axis.
+        top_left_corner = f"{oy} {ox}" if crs_axes_north_first else f"{ox} {oy}"
         matrices.append({
             "id": m.id,
             "scale_denominator": f"{m.scaleDenominator:.6f}",
-            "top_left_corner": f"{ox} {oy}",
+            "top_left_corner": top_left_corner,
             "tile_width": m.tileWidth,
             "tile_height": m.tileHeight,
             "matrix_width": m.matrixWidth,
