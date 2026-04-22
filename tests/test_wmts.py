@@ -470,6 +470,40 @@ def test_registry_unknown_epsg_returns_none():
     assert get_by_name("DoesNotExist") is None
 
 
+def test_registry_epsg3301_custom_tms_is_registered():
+    """EPSG:3301 (Estonian National Grid) builds a custom TMS via build_registry."""
+    from sat_wms.tms_registry import build_registry, get_by_epsg
+
+    build_registry(["EPSG:3301"])
+    tms = get_by_epsg(3301)
+    assert tms is not None
+    assert tms.crs.to_epsg() == 3301
+
+
+def test_registry_arbitrary_epsg_auto_generates_tms():
+    """Any valid projected EPSG code registers a TMS without code changes."""
+    from sat_wms.tms_registry import build_registry, get_by_epsg
+
+    # EPSG:25833 = ETRS89 / UTM zone 33N — not in any hardcoded lookup
+    build_registry(["EPSG:25833"])
+    tms = get_by_epsg(25833)
+    assert tms is not None
+    assert tms.crs.to_epsg() == 25833
+
+
+@pytest.mark.asyncio
+async def test_wmts_capabilities_respects_string_config_without_supported_crs_param(local_mda):
+    """generate_wmts_capabilities reads supported_crs from config when not passed explicitly."""
+    import sat_wms.config as cfg
+    from sat_wms.wmts import generate_wmts_capabilities
+
+    with cfg.config.set({"supported_crs": "EPSG:3301"}):
+        resp = await generate_wmts_capabilities(local_mda)
+    xml = resp.body.decode()
+    assert "EPSG3301" in xml
+    assert "NorthPolarLAEAEurope" not in xml
+
+
 # ---------------------------------------------------------------------------
 # WMTS capabilities - stepped timestep mode
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ from fastapi import Response
 from fastapi.templating import Jinja2Templates
 from rio_tiler.errors import TileOutsideBounds
 
-from sat_wms.config import config
+from sat_wms.config import config, get_supported_crs
 from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, cache_control, composite_images, empty_image
 from sat_wms.tile_cache import TileCache
 from sat_wms.time_utils import _to_iso_duration, ceil_dt, compute_snapshot_times, floor_dt, parse_duration
@@ -117,8 +117,7 @@ async def generate_wmts_capabilities(
     layer_name_prefix: str = "",
 ) -> Response:
     """Render the WMTS 1.0.0 GetCapabilities document."""
-    if supported_crs:
-        build_registry(supported_crs)
+    build_registry(supported_crs if supported_crs is not None else get_supported_crs())
 
     base_title = config.get("wms_title")
     title = f"{base_title} ({duration_str})" if duration_str else base_title
