@@ -682,7 +682,7 @@ async def test_generate_tile_stepped_latest_step_short_ttl_with_microsecond_late
     in Python, causing every tile to get 'immutable'. The fix: strip tz from end_dt before
     comparing, or make latest tz-aware before comparing.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import sat_wms.config as cfg
     from sat_wms.tms_registry import build_registry
@@ -714,9 +714,10 @@ async def test_generate_tile_stepped_out_of_order_granule_rerenders(tmp_path):
     When a new file arrives for the same time step, the DB must be re-queried and
     the tile re-rendered — not served from a stale disk-cache hit keyed by time_bucket.
     """
+    from datetime import datetime, timedelta, timezone
+
     import numpy as np
     import rasterio
-    from datetime import datetime, timedelta, timezone
     from rasterio.crs import CRS
     from rasterio.transform import from_bounds
 
@@ -729,7 +730,10 @@ async def test_generate_tile_stepped_out_of_order_granule_rerenders(tmp_path):
 
     def make_tif(path, r, g, b):
         data = np.zeros((4, 10, 10), dtype=np.uint8)
-        data[0] = r; data[1] = g; data[2] = b; data[3] = 255
+        data[0] = r
+        data[1] = g
+        data[2] = b
+        data[3] = 255
         transform = from_bounds(-1320000, -2781000, 569250, 245250, 10, 10)
         with rasterio.open(
             path, "w", driver="GTiff", height=10, width=10, count=4, dtype=np.uint8,
