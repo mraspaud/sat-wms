@@ -23,3 +23,13 @@ config = Config("sat_wms", defaults=[{
     "snapshot_count": 7,
     "layer_name_prefix": "",
 }])
+
+_DEFAULT_CRS = ["EPSG:3575", "EPSG:3857", "EPSG:5041", "EPSG:4326"]
+
+
+def get_supported_crs() -> list[str]:
+    """Return the configured CRS list, accepting both YAML lists and comma-separated env-var strings."""
+    value = config.get("supported_crs")
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return list(value) if value else _DEFAULT_CRS
