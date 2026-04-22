@@ -22,6 +22,8 @@ config = Config("sat_wms", defaults=[{
     "snapshot_step": "24h",
     "snapshot_count": 7,
     "layer_name_prefix": "",
+    "max_map_pixels": 8192,
+    "cors_allow_origins": ["*"],
 }])
 
 _DEFAULT_CRS = ["EPSG:3575", "EPSG:3857", "EPSG:5041", "EPSG:4326"]
@@ -33,3 +35,11 @@ def get_supported_crs() -> list[str]:
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     return list(value) if value else _DEFAULT_CRS
+
+
+def get_cors_allow_origins() -> list[str]:
+    """Return the configured CORS allow-origins list, normalising string env-vars to a list."""
+    value = config.get("cors_allow_origins")
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return list(value) if value else ["*"]

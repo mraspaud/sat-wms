@@ -16,6 +16,10 @@ from sat_wms.config import config
 from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, TILE_FORMATS, cache_control, empty_image
 
 
+class WmsRequestError(ValueError):
+    """Raised for invalid or out-of-range WMS GetMap parameters."""
+
+
 @dataclass
 class WmsParams:
     """Parsed WMS GetMap parameters."""
@@ -72,24 +76,47 @@ def _is_geographic(crs: str) -> bool:
 
 
 def _parse_params(params: dict) -> WmsParams:
-    """Parse and validate raw WMS query parameters."""
-    layer_name = params["LAYERS"]
-    crs = params["CRS"]
-    srid = int(crs.split(":")[1])
-    bbox = tuple(float(v) for v in params["BBOX"].split(","))
+    """Parse and validate raw WMS query parameters.
+
+    Raises:
+        WmsRequestError: on missing, malformed, or out-of-range parameters.
+    """
+    try:
+        layer_name = params["LAYERS"]
+        crs = params["CRS"]
+        srid = int(crs.split(":")[1])
+        bbox = tuple(float(v) for v in params["BBOX"].split(","))
+    except (KeyError, ValueError, IndexError) as exc:
+        raise WmsRequestError(f"Missing or malformed required parameter: {exc}") from exc
+
     # WMS 1.3.0 uses CRS-defined axis order. Geographic CRS like EPSG:4326 are
     # lat/lon (latitude first), so BBOX arrives as (minlat, minlon, maxlat, maxlon).
     # Swap to (minlon, minlat, maxlon, maxlat) for consistent easting-first handling.
     if _is_geographic(crs):
         bbox = (bbox[1], bbox[0], bbox[3], bbox[2])
-    width = int(params["WIDTH"])
-    height = int(params["HEIGHT"])
+
+    try:
+        width = int(params["WIDTH"])
+        height = int(params["HEIGHT"])
+    except (KeyError, ValueError) as exc:
+        raise WmsRequestError(f"WIDTH and HEIGHT must be positive integers: {exc}") from exc
+
+    max_pixels = int(config.get("max_map_pixels"))
+    if width < 1 or height < 1:
+        raise WmsRequestError("WIDTH and HEIGHT must be positive integers.")
+    if width > max_pixels or height > max_pixels:
+        raise WmsRequestError(f"WIDTH and HEIGHT must not exceed {max_pixels} pixels.")
+
     time_str = params.get("TIME")
-    time = (
-        datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-        if time_str
-        else datetime.now(timezone.utc)
-    )
+    try:
+        time = (
+            datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+            if time_str
+            else datetime.now(timezone.utc)
+        )
+    except ValueError as exc:
+        raise WmsRequestError(f"Invalid TIME parameter: {exc}") from exc
+
     fmt = TILE_FORMATS.get(params.get("FORMAT", "").lower(), "PNG")
     return WmsParams(layer_name=layer_name, bbox=bbox, crs=crs, srid=srid,
                      width=width, height=height, time=time, fmt=fmt)

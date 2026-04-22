@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from rio_tiler.errors import TileOutsideBounds
 
 from sat_wms.config import config, get_supported_crs
+from sat_wms.postgis_utils import parse_postgis_box
 from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, cache_control, composite_images, empty_image
 from sat_wms.tile_cache import TileCache
 from sat_wms.time_utils import _to_iso_duration, ceil_dt, compute_snapshot_times, floor_dt, parse_duration
@@ -98,8 +99,7 @@ def _tms_entry(tms: morecantile.TileMatrixSet, max_zoom: int) -> dict:
 
 def _bbox_to_wgs84(bbox_str: str) -> tuple[float, float, float, float]:
     """Reproject a PostGIS BOX string from EPSG:3575 to WGS84 lon/lat."""
-    coords = bbox_str.replace("BOX(", "").replace(")", "").replace(",", " ").split()
-    minx, miny, maxx, maxy = (float(c) for c in coords)
+    minx, miny, maxx, maxy = parse_postgis_box(bbox_str)
     lon_min, lat_min = _TO_WGS84.transform(minx, miny)
     lon_max, lat_max = _TO_WGS84.transform(maxx, maxy)
     return round(lon_min, 4), round(lat_min, 4), round(lon_max, 4), round(lat_max, 4)
@@ -183,12 +183,57 @@ async def _composite_tiles(filepaths: list[str], tms_id: str, x: int, y: int, z:
     return composite_images(images)
 
 
-
 def _empty_response(fmt: str, media_type: str, headers: dict, empty_no_content: bool) -> Response:
     """Return a 204 or transparent-image response for tiles with no renderable data."""
     if empty_no_content:
         return Response(status_code=204, headers=headers)
     return Response(content=empty_image(256, 256, fmt), media_type=media_type, headers=headers)
+
+
+async def _resolve_cache_and_assets(
+    mda, tile_cache: TileCache, layer: str, tms_id: str,
+    z: int, y: int, x: int, bbox_list: list, src_srid: int,
+    start_dt, end_dt, time_bucket: str, ext: str, interval_min: int,
+) -> tuple[dict, list, str, bytes | None]:
+    """Determine cache key and headers; return (headers, assets, files_key, cached_bytes).
+
+    Stepped mode fetches MDA first (the file list determines the cache key, so out-of-order
+    granules within a time window are never silently ignored).  Interval mode checks the disk
+    cache first and only fetches MDA on a miss.
+    """
+    stepped = config.get("timestep_mode") == "stepped"
+    if stepped:
+        latest, assets = await asyncio.gather(
+            mda.get_latest_time(layer),
+            mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
+        )
+        headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
+        files_key = hashlib.sha1(  # noqa: S324
+            "|".join(sorted(a["filename"] for a in assets)).encode()
+        ).hexdigest()[:16]
+        cached = tile_cache.get(layer, tms_id, z, y, x, files_key, ext)
+        return headers, assets, files_key, cached
+
+    cached = tile_cache.get(layer, tms_id, z, y, x, time_bucket, ext)
+    if cached is not None:
+        return {}, [], time_bucket, cached
+    latest, assets = await asyncio.gather(
+        mda.get_latest_time(layer),
+        mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
+    )
+    headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
+    return headers, assets, time_bucket, None
+
+
+async def _render_tile_image(filepaths: list[str], tms_id: str, x: int, y: int, z: int, fmt: str) -> bytes | None:
+    """Composite granule tiles and encode to the requested format. Returns None if all tiles are empty."""
+    result = await _composite_tiles(filepaths, tms_id, x, y, z)
+    if result is None:
+        return None
+    render_kwargs = {"img_format": fmt} if fmt != "PNG" else {"img_format": "PNG", "zlevel": 1}
+    return await asyncio.get_running_loop().run_in_executor(
+        None, functools.partial(result.render, **render_kwargs)
+    )
 
 
 async def generate_tile(
@@ -228,58 +273,29 @@ async def generate_tile(
         else datetime.now(timezone.utc)
     )
     start_dt = end_dt - duration
-
-    stepped = config.get("timestep_mode") == "stepped"
     time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
 
-    tile_cache = TileCache(
-        cache_dir=config.get("tile_cache_dir"),
-        ttl_days=config.get("tile_cache_ttl_days"),
-    )
-
+    tile_cache = TileCache(cache_dir=config.get("tile_cache_dir"), ttl_days=config.get("tile_cache_ttl_days"))
     bounds = tms.xy_bounds(morecantile.Tile(x, y, z))
     bbox_list = [bounds.left, bounds.bottom, bounds.right, bounds.top]
     src_srid = tms.crs.to_epsg()
 
-    if stepped:
-        # Fetch latest and assets upfront: we need the file list to build a correct
-        # cache key, so new out-of-order granules in the same time window are not ignored.
-        latest, assets = await asyncio.gather(
-            mda.get_latest_time(layer),
-            mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
-        )
-        headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
-        files_key = hashlib.sha1("|".join(sorted(a["filename"] for a in assets)).encode()).hexdigest()[:16]  # noqa: S324
-        cached = tile_cache.get(layer, tms_id, z, y, x, files_key, ext)
-        if cached is not None:
-            return Response(content=cached, media_type=media_type, headers=headers)
-    else:
-        headers = {}
-        cached = tile_cache.get(layer, tms_id, z, y, x, time_bucket, ext)
-        if cached is not None:
-            return Response(content=cached, media_type=media_type, headers=headers)
-        latest, assets = await asyncio.gather(
-            mda.get_latest_time(layer),
-            mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
-        )
-        headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
-        files_key = time_bucket
+    headers, assets, files_key, cached = await _resolve_cache_and_assets(
+        mda, tile_cache, layer, tms_id, z, y, x, bbox_list, src_srid,
+        start_dt, end_dt, time_bucket, ext, interval_min,
+    )
+
+    if cached is not None:
+        return Response(content=cached, media_type=media_type, headers=headers)
 
     if not assets:
         return _empty_response(fmt, media_type, headers, empty_no_content)
 
-    filepaths = [a["filename"] for a in assets]
-
     async with RENDER_SEM:
-        result = await _composite_tiles(filepaths, tms_id, x, y, z)
+        image = await _render_tile_image([a["filename"] for a in assets], tms_id, x, y, z, fmt)
 
-        if result is None:
-            return _empty_response(fmt, media_type, headers, empty_no_content)
-
-        render_kwargs = {"img_format": fmt} if fmt != "PNG" else {"img_format": "PNG", "zlevel": 1}
-        image = await asyncio.get_running_loop().run_in_executor(
-            None, functools.partial(result.render, **render_kwargs)
-        )
+    if image is None:
+        return _empty_response(fmt, media_type, headers, empty_no_content)
 
     tile_cache.put(layer, tms_id, z, y, x, files_key, ext, image)
     return Response(content=image, media_type=media_type, headers=headers)

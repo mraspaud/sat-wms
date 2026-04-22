@@ -1,6 +1,14 @@
 """Disk-based tile cache for WMTS rendered tiles."""
+import re
 import time
 from pathlib import Path
+
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def _is_safe(*names: str) -> bool:
+    """Return True if every name matches the safe-name allowlist (alphanumerics, _, -)."""
+    return all(_SAFE_NAME.match(n) for n in names)
 
 
 class TileCache:
@@ -20,8 +28,8 @@ class TileCache:
 
     def get(self, layer: str, tms_id: str, z: int, y: int, x: int,
             time_bucket: str, ext: str) -> bytes | None:
-        """Return cached tile bytes or None (cache miss, expired, or disabled)."""
-        if not self._dir:
+        """Return cached tile bytes or None (cache miss, expired, disabled, or unsafe name)."""
+        if not self._dir or not _is_safe(layer, tms_id):
             return None
         p = self._path(layer, tms_id, z, y, x, time_bucket, ext)
         if not p.exists():
@@ -34,8 +42,8 @@ class TileCache:
 
     def put(self, layer: str, tms_id: str, z: int, y: int, x: int,
             time_bucket: str, ext: str, data: bytes) -> None:
-        """Write tile bytes to disk."""
-        if not self._dir:
+        """Write tile bytes to disk, silently ignoring unsafe layer or TMS names."""
+        if not self._dir or not _is_safe(layer, tms_id):
             return
         p = self._path(layer, tms_id, z, y, x, time_bucket, ext)
         p.parent.mkdir(parents=True, exist_ok=True)

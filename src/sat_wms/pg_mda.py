@@ -2,12 +2,7 @@
 from psycopg.rows import dict_row
 
 from sat_wms.config import config
-
-
-def _parse_box(box_str: str) -> tuple[float, float, float, float]:
-    """Parse a PostGIS BOX string into (minx, miny, maxx, maxy)."""
-    coords = box_str.replace("BOX(", "").replace(")", "").replace(",", " ").split()
-    return tuple(float(c) for c in coords)
+from sat_wms.postgis_utils import parse_postgis_box
 
 
 class PooledMetadataRepository:
@@ -81,7 +76,7 @@ class PooledMetadataRepository:
                 })
                 rows = await cur.fetchall()
                 return [
-                    {"filename": row["filename"], "bbox": _parse_box(row["granule_bbox"]),
+                    {"filename": row["filename"], "bbox": parse_postgis_box(row["granule_bbox"]),
                      "bbox_srid": row["bbox_srid"]}
                     for row in rows
                 ]

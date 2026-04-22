@@ -95,8 +95,8 @@ def _compute_extent(
                 if abs(x) < 1e10 and abs(y) < 1e10:  # filter inf/overflow
                     xs.append(x)
                     ys.append(y)
-            except Exception:  # noqa: BLE001, S110
-                pass
+            except Exception:  # noqa: BLE001
+                log.debug("Transform failed at lon=%s lat=%s — skipped", lon, lat)
     if not xs:
         return None
     return min(xs), min(ys), max(xs), max(ys)

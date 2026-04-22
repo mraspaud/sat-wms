@@ -35,4 +35,11 @@ def test_tile_cache_get_returns_none_after_ttl(tmp_path):
     assert result is None
 
 
+def test_tile_cache_rejects_path_traversal_in_layer(tmp_path):
+    """get() returns None and put() is a no-op when layer contains path traversal sequences."""
+    from sat_wms.tile_cache import TileCache
 
+    cache = TileCache(cache_dir=str(tmp_path))
+    cache.put("../../etc/passwd", "tms", 0, 0, 0, "bucket", "png", b"data")
+    assert cache.get("../../etc/passwd", "tms", 0, 0, 0, "bucket", "png") is None
+    assert not any(tmp_path.iterdir())
