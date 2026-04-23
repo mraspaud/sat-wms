@@ -21,7 +21,7 @@
             </GetMap>
         </Request>
         <Layer>
-            <Title>Nordsat VIIRS Products</Title>
+            <Title>{{ title }}</Title>
             {%- for layer in layers %}
             <Layer queryable="0">
                 <Name>{{ layer.layer_name }}</Name>

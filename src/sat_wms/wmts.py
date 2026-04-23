@@ -285,7 +285,11 @@ async def generate_tile(
     start_dt = end_dt - duration
     time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
 
-    tile_cache = TileCache(cache_dir=config.get("tile_cache_dir"), ttl_days=config.get("tile_cache_ttl_days"))
+    tile_cache = TileCache(
+        cache_dir=config.get("tile_cache_dir"),
+        ttl_days=int(config.get("tile_cache_ttl_days")),
+        max_size_mb=int(config.get("tile_cache_max_size_mb")),
+    )
     bounds = tms.xy_bounds(morecantile.Tile(x, y, z))
     bbox_list = [bounds.left, bounds.bottom, bounds.right, bounds.top]
     src_srid = tms.crs.to_epsg()
