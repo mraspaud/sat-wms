@@ -327,7 +327,7 @@ def test_read_tile_uses_bilinear_resampling():
     """_read_tile must pass resampling_method='bilinear' to COGReader.tile to prevent seam artefacts."""
     from unittest.mock import MagicMock, patch
 
-    from sat_wms.wmts import _read_tile
+    from sat_wms.wmts import _read_tile, _read_tile_sync
 
     _read_tile.cache_clear()
     mock_cog = MagicMock()
@@ -341,7 +341,7 @@ def test_read_tile_uses_bilinear_resampling():
 
     with patch("rasterio.open", return_value=mock_src), \
          patch("rio_tiler.io.COGReader", return_value=mock_cog):
-        _read_tile("test.tif", "NorthPolarLAEAEurope", 3, 4, 3)
+        _read_tile_sync("test.tif", "NorthPolarLAEAEurope", 3, 4, 3)
 
     mock_cog.tile.assert_called_once_with(3, 4, 3, resampling_method="bilinear")
 
@@ -358,7 +358,7 @@ def test_read_tile_gcp_file_pre_wraps_to_tms_crs(tmp_path):
     from rasterio.crs import CRS
 
     from sat_wms.tms_registry import build_registry, get_by_name
-    from sat_wms.wmts import _read_tile
+    from sat_wms.wmts import _read_tile, _read_tile_sync
 
     build_registry(["EPSG:3575"])
     _read_tile.cache_clear()
@@ -384,7 +384,7 @@ def test_read_tile_gcp_file_pre_wraps_to_tms_crs(tmp_path):
 
     from unittest.mock import patch
     with patch("rasterio.vrt.WarpedVRT", side_effect=spy_vrt):
-        _read_tile(fp, "NorthPolarLAEAEurope", 3, 4, 3)
+        _read_tile_sync(fp, "NorthPolarLAEAEurope", 3, 4, 3)
 
     assert captured_crs, "WarpedVRT was not called — GCP file must be pre-wrapped"
     assert captured_crs[0] == tms.crs, f"WarpedVRT must target TMS CRS {tms.crs}, got {captured_crs[0]}"
@@ -615,7 +615,7 @@ async def test_read_tile_missing_file_returns_none():
 
     build_registry(["EPSG:3575"])
     _read_tile.cache_clear()
-    result = _read_tile("/nonexistent/path/file.tiff", "NorthPolarLAEAEurope", 3, 4, 3)
+    result = await _read_tile("/nonexistent/path/file.tiff", "NorthPolarLAEAEurope", 3, 4, 3)
     assert result is None
 
 
@@ -686,7 +686,12 @@ async def test_generate_tile_stepped_cache_hit_last_step_has_short_ttl(tmp_path)
 
 @pytest.mark.asyncio
 async def test_generate_tile_stepped_cache_hit_snapshot_has_long_ttl(tmp_path):
-    """Disk-cache hit for a historical snapshot returns Cache-Control max-age=86400, immutable."""
+    """Disk-cache hit for a historical snapshot in stepped mode returns max-age=300 (not immutable).
+
+    In stepped mode the 'latest' TIME shifts with every new granule ingest.  Using 'immutable'
+    would lock tiles in the browser cache for 24 h even though the underlying data can change
+    as old granules are purged from the aggregation window.
+    """
     from datetime import datetime, timezone
 
     import sat_wms.config as cfg
@@ -711,7 +716,7 @@ async def test_generate_tile_stepped_cache_hit_snapshot_has_long_ttl(tmp_path):
         resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
                                    time_str="2026-04-21T00:00:00Z", fmt="PNG", interval_min=10)
 
-    assert resp.headers["cache-control"] == "public, max-age=86400, immutable"
+    assert resp.headers["cache-control"] == "public, max-age=300"
 
 @pytest.mark.asyncio
 async def test_generate_tile_stepped_no_content_last_step_has_short_ttl():
@@ -741,7 +746,7 @@ async def test_generate_tile_stepped_no_content_last_step_has_short_ttl():
 
 @pytest.mark.asyncio
 async def test_generate_tile_stepped_no_content_snapshot_has_long_ttl():
-    """No-content response for a historical snapshot in stepped mode returns Cache-Control max-age=86400."""
+    """No-content response for a historical snapshot in stepped mode returns max-age=300."""
     from datetime import datetime, timezone
 
     import sat_wms.config as cfg
@@ -762,7 +767,7 @@ async def test_generate_tile_stepped_no_content_snapshot_has_long_ttl():
         resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
                                    time_str="2026-04-21T00:00:00Z", fmt="PNG", interval_min=10)
 
-    assert resp.headers["cache-control"] == "public, max-age=86400, immutable"
+    assert resp.headers["cache-control"] == "public, max-age=300"
 
 
 @pytest.mark.asyncio

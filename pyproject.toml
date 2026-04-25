@@ -13,6 +13,7 @@ dependencies = [
     "morecantile>=7.0",
     "h2>=4.3.0",
     "shapely>=2.1.2",
+    "async-lru>=2.3.0",
 ]
 dynamic = ["version"]
 

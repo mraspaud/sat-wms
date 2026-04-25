@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pyproj
+from async_lru import alru_cache
 from fastapi import Response
 from rasterio.crs import CRS
 from rio_tiler.io import COGReader
@@ -116,8 +117,7 @@ def _parse_params(params: dict) -> WmsParams:
                      width=width, height=height, time=time, fmt=fmt)
 
 
-@functools.lru_cache(maxsize=config.get("tile_cache_entries"))
-def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
+def _read_one_sync(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
     """Read a single GeoTIFF into an ImageData (runs in a thread). Returns None if file is missing."""
     import contextlib  # noqa: PLC0415
     import logging  # noqa: PLC0415
@@ -148,6 +148,13 @@ def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
         return None
 
 
+@alru_cache(maxsize=config.get("tile_cache_entries"), ttl=300)
+async def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
+    """Async LRU-cached granule read with 5-min TTL; coalesces concurrent requests."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(READ_POOL, _read_one_sync, fp, bbox, dst_crs, width, height)
+
+
 def _merge_sub(canvas, gaps, img, col_min, row_min, col_max, row_max):
     """Paste img into the sub-region of canvas defined by pixel coords, respecting gaps."""
     sub_canvas = canvas[:, row_min:row_max, col_min:col_max]
@@ -161,7 +168,6 @@ def _merge_sub(canvas, gaps, img, col_min, row_min, col_max, row_max):
 
 async def _read_and_composite(assets, p):
     """Read each asset at its canvas sub-region size in parallel, composite in priority order."""
-    loop = asyncio.get_running_loop()
     canvas = None
     gaps = None
     dst_crs_obj = CRS.from_authority(*p.crs.split(":"))
@@ -175,7 +181,7 @@ async def _read_and_composite(assets, p):
         sub_bbox, col_min, row_min, col_max, row_max = region
         regions.append((col_min, row_min, col_max, row_max))
         sub_w, sub_h = col_max - col_min, row_max - row_min
-        reads.append(loop.run_in_executor(READ_POOL, _read_one, a["filename"], sub_bbox, p.crs, sub_w, sub_h))
+        reads.append(_read_one(a["filename"], sub_bbox, p.crs, sub_w, sub_h))
 
     if not reads:
         return None
@@ -213,7 +219,8 @@ async def generate_map(
         mda.get_map_assets(p.layer_name, list(p.bbox), start_dt, end_dt, src_srid=p.srid),
     )
 
-    headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
+    headers = {"Cache-Control": cache_control(latest, end_dt, interval_min,
+                                              stepped=config.get("timestep_mode") == "stepped")}
     media_type = MEDIA_TYPES[p.fmt]
 
     if not assets:

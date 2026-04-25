@@ -136,3 +136,21 @@ def test_cache_control_tz_naive_snapshot_gives_long_ttl():
 
     assert cache_control(latest_naive, snapshot_aware, interval_min=5) == \
         "public, max-age=86400, immutable"
+
+
+def test_cache_control_stepped_non_latest_uses_short_max_age():
+    """In stepped mode, non-latest tiles get max-age=300 instead of immutable.
+
+    When a new granule is ingested, the client's "latest" TIME becomes stale.
+    Using 'immutable' locks these tiles in browser cache for 24h even though the
+    underlying data can change as old granules are purged.
+    """
+    from datetime import datetime, timezone
+
+    from sat_wms.rendering import cache_control
+
+    latest = datetime(2026, 4, 22, 7, 58, 38, tzinfo=timezone.utc)
+    end_dt = datetime(2026, 4, 22, 0, 0, 0, tzinfo=timezone.utc)  # old snapshot
+
+    result = cache_control(latest, end_dt, interval_min=5, stepped=True)
+    assert result == "public, max-age=300"

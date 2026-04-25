@@ -8,6 +8,7 @@ from importlib.resources import files
 import morecantile
 import numpy as np
 import pyproj
+from async_lru import alru_cache
 from fastapi import Response
 from fastapi.templating import Jinja2Templates
 from rio_tiler.errors import TileOutsideBounds
@@ -44,9 +45,8 @@ def _ows_exception(msg: str, code: str) -> Response:
     return Response(content=content, media_type="text/xml", status_code=400)
 
 
-@functools.lru_cache(maxsize=config.get("tile_cache_entries"))
-def _read_tile(fp: str, tms_id: str, x: int, y: int, z: int):
-    """Read a 256×256 tile from a COG via COGReader.tile() (LRU-cached, runs in a thread).
+def _read_tile_sync(fp: str, tms_id: str, x: int, y: int, z: int):
+    """Read a 256×256 tile from a COG via COGReader.tile() (runs in a thread).
 
     If the file carries GCPs (e.g. raw SAR granules) the dataset is pre-wrapped in a
     WarpedVRT targeting the TMS CRS so that GDAL overview selection operates in metres
@@ -82,6 +82,13 @@ def _read_tile(fp: str, tms_id: str, x: int, y: int, z: int):
     except (OSError, rasterio.errors.RasterioIOError):
         logging.getLogger(__name__).warning("File not found, skipping: %s", fp)
         return None
+
+
+@alru_cache(maxsize=config.get("tile_cache_entries"), ttl=300)
+async def _read_tile(fp: str, tms_id: str, x: int, y: int, z: int):
+    """Async LRU-cached tile read with 5-min TTL; coalesces concurrent requests for the same tile."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(READ_POOL, _read_tile_sync, fp, tms_id, x, y, z)
 
 
 def _tms_entry(tms: morecantile.TileMatrixSet, max_zoom: int) -> dict:
@@ -177,13 +184,12 @@ async def generate_wmts_capabilities(
 
 async def _composite_tiles(filepaths: list[str], tms_id: str, x: int, y: int, z: int) -> "ImageData | None":
     """Read and composite tiles from filepaths, returning None if all are out-of-bounds."""
-    loop = asyncio.get_running_loop()
     images = []
     gaps = None
 
     for start in range(0, len(filepaths), _BATCH_SIZE):
         batch = filepaths[start:start + _BATCH_SIZE]
-        aws = [loop.run_in_executor(READ_POOL, _read_tile, fp, tms_id, x, y, z) for fp in batch]
+        aws = [_read_tile(fp, tms_id, x, y, z) for fp in batch]
         batch_images = await asyncio.gather(*aws)
         for img in batch_images:
             images.append(img)
@@ -221,7 +227,7 @@ async def _resolve_cache_and_assets(
             mda.get_latest_time(layer),
             mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
         )
-        headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
+        headers = {"Cache-Control": cache_control(latest, end_dt, interval_min, stepped=True)}
         files_key = hashlib.sha1(  # noqa: S324
             "|".join(sorted(a["filename"] for a in assets)).encode()
         ).hexdigest()[:16]

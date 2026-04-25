@@ -57,7 +57,7 @@ def empty_image(width: int, height: int, img_format: str) -> bytes:
     return ImageData(data).render(img_format=img_format)
 
 
-def cache_control(latest: datetime | None, end_dt: datetime, interval_min: int) -> str:
+def cache_control(latest: datetime | None, end_dt: datetime, interval_min: int, stepped: bool = False) -> str:
     """Return an appropriate Cache-Control header value.
 
     Works correctly whether `latest` is tz-aware or tz-naive (the DB schema stores
@@ -69,7 +69,11 @@ def cache_control(latest: datetime | None, end_dt: datetime, interval_min: int) 
     latest_naive = latest.replace(tzinfo=None)
     end_dt_naive = end_dt.replace(tzinfo=None)
     is_latest = floor_dt(latest_naive, interval_min) == floor_dt(end_dt_naive, interval_min)
-    return "public, max-age=60, stale-while-revalidate=60" if is_latest else "public, max-age=86400, immutable"
+    if is_latest:
+        return "public, max-age=60, stale-while-revalidate=60"
+    if stepped:
+        return "public, max-age=300"
+    return "public, max-age=86400, immutable"
 
 
 def composite_images(images: list[ImageData | None]) -> ImageData | None:

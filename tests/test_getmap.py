@@ -226,7 +226,7 @@ def test_read_one_uses_bilinear_resampling():
     """_read_one must pass resampling_method='bilinear' to COGReader.part to prevent seam artefacts."""
     from unittest.mock import MagicMock, patch
 
-    from sat_wms.getmap import _read_one
+    from sat_wms.getmap import _read_one, _read_one_sync
 
     _read_one.cache_clear()
     mock_cog = MagicMock()
@@ -242,7 +242,7 @@ def test_read_one_uses_bilinear_resampling():
     with patch("rasterio.open", return_value=mock_src), \
          patch("sat_wms.getmap.COGReader", return_value=mock_cog):
         with rasterio.Env():
-            _read_one("test.tif", (0.0, 0.0, 1.0, 1.0), "EPSG:3575", 256, 256)
+            _read_one_sync("test.tif", (0.0, 0.0, 1.0, 1.0), "EPSG:3575", 256, 256)
 
     _, call_kwargs = mock_cog.part.call_args
     assert call_kwargs.get("resampling_method") == "bilinear"
@@ -250,12 +250,11 @@ def test_read_one_uses_bilinear_resampling():
 
 def test_read_one_missing_file_returns_none():
     """_read_one returns None when the file does not exist on disk."""
-    from sat_wms.getmap import _read_one
+    from sat_wms.getmap import _read_one, _read_one_sync
 
     _read_one.cache_clear()
-    result = _read_one("/nonexistent/missing.tiff", (-1000000, -2000000, 0, 0), "EPSG:3575", 256, 256)
+    result = _read_one_sync("/nonexistent/missing.tiff", (-1000000, -2000000, 0, 0), "EPSG:3575", 256, 256)
     assert result is None
-    _read_one.cache_clear()
 
 
 def test_read_one_gcp_file_pre_wraps_to_dst_crs(tmp_path):
@@ -265,7 +264,7 @@ def test_read_one_gcp_file_pre_wraps_to_dst_crs(tmp_path):
     from rasterio.control import GroundControlPoint
     from rasterio.crs import CRS
 
-    from sat_wms.getmap import _read_one
+    from sat_wms.getmap import _read_one, _read_one_sync
 
     _read_one.cache_clear()
 
@@ -288,7 +287,7 @@ def test_read_one_gcp_file_pre_wraps_to_dst_crs(tmp_path):
 
     from unittest.mock import patch
     with patch("rasterio.vrt.WarpedVRT", side_effect=spy_vrt):
-        _read_one(fp, (-627608, -3909127, -340705, -3738249), "EPSG:3575", 256, 256)
+        _read_one_sync(fp, (-627608, -3909127, -340705, -3738249), "EPSG:3575", 256, 256)
 
     assert captured_crs, "WarpedVRT was not called — GCP file must be pre-wrapped"
     assert captured_crs[0] == CRS.from_epsg(3575)
