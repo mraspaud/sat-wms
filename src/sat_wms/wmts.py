@@ -2,6 +2,7 @@
 import asyncio
 import functools
 import hashlib
+import os
 from datetime import timedelta
 from importlib.resources import files
 
@@ -213,36 +214,42 @@ def _empty_response(fmt: str, media_type: str, headers: dict, empty_no_content: 
 async def _resolve_cache_and_assets(
     mda, tile_cache: TileCache, layer: str, tms_id: str,
     z: int, y: int, x: int, bbox_list: list, src_srid: int,
-    start_dt, end_dt, time_bucket: str, ext: str, interval_min: int,
+    start_dt, end_dt, ext: str, interval_min: int,
 ) -> tuple[dict, list, str, bytes | None]:
     """Determine cache key and headers; return (headers, assets, files_key, cached_bytes).
 
-    Stepped mode fetches MDA first (the file list determines the cache key, so out-of-order
-    granules within a time window are never silently ignored).  Interval mode checks the disk
-    cache first and only fetches MDA on a miss.
+    Always queries the DB first so the cache key reflects the current file set.
+    This ensures stale tiles are never served when data is added or removed.
     """
     stepped = config.get("timestep_mode") == "stepped"
-    if stepped:
-        latest, assets = await asyncio.gather(
-            mda.get_latest_time(layer),
-            mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
-        )
-        headers = {"Cache-Control": cache_control(latest, end_dt, interval_min, stepped=True)}
-        files_key = hashlib.sha1(  # noqa: S324
-            "|".join(sorted(a["filename"] for a in assets)).encode()
-        ).hexdigest()[:16]
-        cached = tile_cache.get(layer, tms_id, z, y, x, files_key, ext)
-        return headers, assets, files_key, cached
-
-    cached = tile_cache.get(layer, tms_id, z, y, x, time_bucket, ext)
-    if cached is not None:
-        return {}, [], time_bucket, cached
     latest, assets = await asyncio.gather(
         mda.get_latest_time(layer),
         mda.get_map_assets(layer, bbox_list, start_dt, end_dt, src_srid=src_srid),
     )
-    headers = {"Cache-Control": cache_control(latest, end_dt, interval_min)}
-    return headers, assets, time_bucket, None
+    headers = {"Cache-Control": cache_control(latest, end_dt, interval_min, stepped=stepped)}
+    assets, files_key = _validate_assets_and_compute_key(assets)
+    cached = tile_cache.get(layer, tms_id, z, y, x, files_key, ext)
+    return headers, assets, files_key, cached
+
+
+def _validate_assets_and_compute_key(assets: list) -> tuple[list, str]:
+    """Drop assets whose file is missing, and key the cache on (filename, mtime_ns, size).
+
+    Including disk state in the key prevents stale tiles when DB metadata lags behind disk
+    cleanup (or in-place file rewrites): a file disappearing or being modified produces a
+    new key, forcing a fresh render rather than serving a previously-cached composite.
+    """
+    kept = []
+    parts = []
+    for a in assets:
+        try:
+            st = os.stat(a["filename"])
+        except FileNotFoundError:
+            continue
+        kept.append(a)
+        parts.append(f"{a['filename']}|{st.st_mtime_ns}|{st.st_size}")
+    files_key = hashlib.sha1("||".join(sorted(parts)).encode()).hexdigest()[:16]  # noqa: S324
+    return kept, files_key
 
 
 async def _render_tile_image(filepaths: list[str], tms_id: str, x: int, y: int, z: int, fmt: str) -> bytes | None:
@@ -289,7 +296,6 @@ async def generate_tile(
 
     end_dt = parse_end_time(time_str)
     start_dt = end_dt - duration
-    time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
 
     tile_cache = TileCache(
         cache_dir=config.get("tile_cache_dir"),
@@ -302,7 +308,7 @@ async def generate_tile(
 
     headers, assets, files_key, cached = await _resolve_cache_and_assets(
         mda, tile_cache, layer, tms_id, z, y, x, bbox_list, src_srid,
-        start_dt, end_dt, time_bucket, ext, interval_min,
+        start_dt, end_dt, ext, interval_min,
     )
 
     if cached is not None:

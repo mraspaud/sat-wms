@@ -90,7 +90,7 @@ class TileCache:
             return
 
         entries.sort()  # oldest mtime first
-        for mtime, size, f in entries:
+        for _mtime, size, f in entries:
             if total <= self._max_size_bytes:
                 break
             f.unlink(missing_ok=True)

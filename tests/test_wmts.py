@@ -249,41 +249,44 @@ def test_composite_tiles_batch_size_is_large_enough_for_sar():
 
 @pytest.mark.asyncio
 async def test_generate_tile_serves_from_disk_cache(tmp_path):
-    """generate_tile returns cached bytes without calling the repository when cache hits."""
+    """generate_tile returns cached bytes when the DB-derived files_key matches a disk cache entry."""
+    import hashlib
+    import os
     from datetime import datetime, timedelta, timezone
 
     from sat_wms.config import config
     from sat_wms.tile_cache import TileCache
-    from sat_wms.time_utils import floor_dt
     from sat_wms.tms_registry import build_registry
     from sat_wms.wmts import generate_tile
 
     build_registry(["EPSG:3575"])
 
-    interval_min = 60
-    end_dt = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
+    real_file = tmp_path / "granule_A.tif"
+    real_file.write_bytes(b"granule-data")
+    st = os.stat(real_file)
+    files_key = hashlib.sha1(  # noqa: S324
+        f"{real_file}|{st.st_mtime_ns}|{st.st_size}".encode()
+    ).hexdigest()[:16]
 
     cache = TileCache(cache_dir=str(tmp_path))
-    cache.put("test_layer", "NorthPolarLAEAEurope", 3, 4, 5, time_bucket, "png", b"\x89PNG-cached")
+    cache.put("test_layer", "NorthPolarLAEAEurope", 3, 4, 5, files_key, "png", b"\x89PNG-cached")
 
-    class ShouldNotBeCalledMDA:
+    class StubMDA:
         async def get_latest_time(self, _layer):
-            raise AssertionError("repository should not be called on cache hit")
+            return datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
         async def get_map_assets(self, *_args, **_kwargs):
-            raise AssertionError("repository should not be called on cache hit")
+            return [{"filename": str(real_file), "bbox": (-1e6, -2e6, 1e6, 2e6), "bbox_srid": 3575}]
 
     with config.set({"tile_cache_dir": str(tmp_path)}):
         resp = await generate_tile(
-            ShouldNotBeCalledMDA(),
+            StubMDA(),
             layer="test_layer",
             tms_id="NorthPolarLAEAEurope",
             z=3, y=4, x=5,
             duration=timedelta(hours=1),
             time_str="2026-01-01T12:00:00Z",
             fmt="PNG",
-            interval_min=interval_min,
         )
 
     assert resp.body == b"\x89PNG-cached"
@@ -291,17 +294,16 @@ async def test_generate_tile_serves_from_disk_cache(tmp_path):
 
 @pytest.mark.asyncio
 async def test_generate_tile_writes_rendered_tile_to_cache(tmp_path, synth_mda):
-    """After rendering, generate_tile stores the result in the disk cache."""
-    from datetime import datetime, timedelta, timezone
+    """After rendering, generate_tile stores the result in the disk cache keyed by files_key."""
+    import hashlib
+    from datetime import timedelta
 
     from sat_wms.config import config
     from sat_wms.tile_cache import TileCache
-    from sat_wms.time_utils import floor_dt
     from sat_wms.tms_registry import build_registry
     from sat_wms.wmts import generate_tile
 
     build_registry(["EPSG:3575"])
-    interval_min = 60
 
     with config.set({"tile_cache_dir": str(tmp_path)}):
         resp = await generate_tile(
@@ -312,14 +314,18 @@ async def test_generate_tile_writes_rendered_tile_to_cache(tmp_path, synth_mda):
             duration=timedelta(hours=6),
             time_str="2026-03-24T06:00:00Z",
             fmt="PNG",
-            interval_min=interval_min,
         )
 
     assert resp.status_code == 200
-    end_dt = datetime(2026, 3, 24, 6, 0, tzinfo=timezone.utc)
-    time_bucket = floor_dt(end_dt, interval_min).strftime("%Y%m%dT%H%M")
+    assets = await synth_mda.get_map_assets()
+    import os
+    parts = []
+    for a in assets:
+        st = os.stat(a["filename"])
+        parts.append(f"{a['filename']}|{st.st_mtime_ns}|{st.st_size}")
+    files_key = hashlib.sha1("||".join(sorted(parts)).encode()).hexdigest()[:16]  # noqa: S324
     cache = TileCache(cache_dir=str(tmp_path))
-    cached = cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, time_bucket, "png")
+    cached = cache.get("true_color_day", "NorthPolarLAEAEurope", 3, 4, 3, files_key, "png")
     assert cached == resp.body
 
 
@@ -886,3 +892,120 @@ async def test_generate_tile_comma_separated_time_uses_latest(synth_mda):
         time_str="2026-03-20T12:00:00Z,2026-03-21T00:00:00Z,2026-03-24T06:00:00Z",
     )
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_returns_empty_when_files_disappear(tmp_path):
+    """Disk cache must not serve stale data when all files for a tile disappear from DB.
+
+    Regression: when the DB result changes from N files to 0 files within the same
+    time bucket, the cache must detect this and return an empty tile.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    import numpy as np
+    import rasterio
+    from rasterio.crs import CRS
+    from rasterio.transform import from_bounds
+
+    import sat_wms.config as cfg
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import _read_tile, generate_tile
+
+    build_registry(["EPSG:3575"])
+    _read_tile.cache_clear()
+
+    tif_path = str(tmp_path / "granule.tif")
+    bbox = (-1320000.0, -2781000.0, 569250.0, 245250.0)
+    data = np.zeros((4, 10, 10), dtype=np.uint8)
+    data[0] = 200
+    data[3] = 255
+    with rasterio.open(
+        tif_path, "w", driver="GTiff", height=10, width=10, count=4,
+        dtype=np.uint8, crs=CRS.from_epsg(3575),
+        transform=from_bounds(*bbox, 10, 10),
+    ) as dst:
+        dst.write(data)
+
+    call_count = 0
+
+    class ShrinkingMDA:
+        async def get_latest_time(self, _layer):
+            return datetime(2026, 3, 24, 10, 0, tzinfo=timezone.utc)
+
+        async def get_map_assets(self, *_a, **_kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [{"filename": tif_path, "bbox": bbox, "bbox_srid": 3575}]
+            return []
+
+    mda = ShrinkingMDA()
+    with cfg.config.set({"tile_cache_dir": str(tmp_path / "cache")}):
+        resp1 = await generate_tile(mda, **_TILE_KW, duration=timedelta(hours=6),
+                                    time_str="2026-03-24T10:00:00Z")
+        assert resp1.status_code == 200
+
+        _read_tile.cache_clear()
+
+        resp2 = await generate_tile(mda, **_TILE_KW, duration=timedelta(hours=6),
+                                    time_str="2026-03-24T10:00:00Z")
+
+    _read_tile.cache_clear()
+    assert resp2.body != resp1.body, "second response must differ — DB now has 0 files"
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_does_not_serve_stale_when_db_lists_missing_file(tmp_path):
+    """If DB still lists a file that's been deleted on disk, the cache key must reflect that.
+
+    Reproduces the production stale-tile bug:
+    1. At T0: DB returned [A, B], both existed on disk; tile rendered & cached under hash(A,B).
+    2. At T1: file A is deleted on disk. DB still returns [A, B] (cleanup lag).
+    3. New request must NOT serve the stale cached composite (which contained A's data).
+    """
+    import hashlib
+    from datetime import datetime, timedelta, timezone
+
+    from sat_wms.config import config
+    from sat_wms.tile_cache import TileCache
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import _read_tile, generate_tile
+
+    build_registry(["EPSG:3575"])
+    _read_tile.cache_clear()
+
+    file_a = "/nonexistent/granule_A.tif"
+    file_b = "/nonexistent/granule_B.tif"
+    stale_key = hashlib.sha1(  # noqa: S324
+        "|".join(sorted([file_a, file_b])).encode()
+    ).hexdigest()[:16]
+
+    cache = TileCache(cache_dir=str(tmp_path))
+    cache.put("test_layer", "NorthPolarLAEAEurope", 3, 4, 5, stale_key, "png", b"\x89PNG-STALE")
+
+    class StubMDA:
+        async def get_latest_time(self, _layer):
+            return datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+        async def get_map_assets(self, *_args, **_kwargs):
+            return [
+                {"filename": file_a, "bbox": (-1e6, -2e6, 1e6, 2e6), "bbox_srid": 3575},
+                {"filename": file_b, "bbox": (-1e6, -2e6, 1e6, 2e6), "bbox_srid": 3575},
+            ]
+
+    with config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
+        resp = await generate_tile(
+            StubMDA(),
+            layer="test_layer",
+            tms_id="NorthPolarLAEAEurope",
+            z=3, y=4, x=5,
+            duration=timedelta(hours=1),
+            time_str="2026-01-01T12:00:00Z",
+            fmt="PNG",
+        )
+    _read_tile.cache_clear()
+
+    assert resp.body != b"\x89PNG-STALE", (
+        "Stale cached tile was returned even though the files are no longer on disk"
+    )
