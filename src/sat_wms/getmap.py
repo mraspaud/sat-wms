@@ -10,11 +10,23 @@ import pyproj
 from async_lru import alru_cache
 from fastapi import Response
 from rasterio.crs import CRS
-from rio_tiler.io import COGReader
 from rio_tiler.models import ImageData
 
 from sat_wms.config import config
-from sat_wms.rendering import MEDIA_TYPES, READ_POOL, RENDER_SEM, TILE_FORMATS, cache_control, empty_image
+from sat_wms.rendering import (
+    DEFAULT_RENDER_OPTIONS,
+    MEDIA_TYPES,
+    READ_POOL,
+    RENDER_SEM,
+    RenderOptions,
+    cache_control,
+    empty_image,
+    encode_image,
+    format_from_params,
+    is_range_probe,
+    range_probe_response,
+    read_cog,
+)
 from sat_wms.time_utils import parse_end_time
 
 
@@ -36,45 +48,45 @@ class WmsParams:
     fmt: str = "PNG"
 
 
-@functools.lru_cache(maxsize=16)
-def _to_request_crs(src_srid: int, dst_srid: int):
-    """Return a cached pyproj Transformer between two SRIDs."""
-    return pyproj.Transformer.from_crs(f"EPSG:{src_srid}", f"EPSG:{dst_srid}", always_xy=True)
+async def generate_map(
+    mda, params: dict, duration: timedelta, *,
+    options: RenderOptions = DEFAULT_RENDER_OPTIONS, range_header: str | None = None,
+) -> Response:
+    """Handle a WMS GetMap request."""
+    wms = _parse_params(params)
+    if options.force_webp:
+        wms = dataclasses.replace(wms, fmt="WEBP")
+    end_dt = wms.time
+    start_dt = end_dt - duration
 
+    latest, assets = await asyncio.gather(
+        mda.get_latest_time(wms.layer_name),
+        mda.get_map_assets(wms.layer_name, list(wms.bbox), start_dt, end_dt, src_srid=wms.srid),
+    )
 
-def _granule_pixel_region(granule_bbox, granule_srid, canvas_bbox, canvas_srid, width, height):
-    """Return (sub_bbox, col_min, row_min, col_max, row_max) or None if no overlap.
+    headers = {"Cache-Control": cache_control(latest, end_dt, options.interval_min,
+                                              stepped=config.get("timestep_mode") == "stepped")}
+    media_type = MEDIA_TYPES[wms.fmt]
 
-    All bboxes are (minx, miny, maxx, maxy).
-    """
-    gminx, gminy, gmaxx, gmaxy = granule_bbox
-    if granule_srid != canvas_srid:
-        tx = _to_request_crs(granule_srid, canvas_srid)
-        corners = [tx.transform(x, y) for x, y in ((gminx, gminy), (gminx, gmaxy), (gmaxx, gminy), (gmaxx, gmaxy))]
-        gminx = min(c[0] for c in corners)
-        gmaxx = max(c[0] for c in corners)
-        gminy = min(c[1] for c in corners)
-        gmaxy = max(c[1] for c in corners)
-    cminx, cminy, cmaxx, cmaxy = canvas_bbox
-    sub_minx, sub_miny = max(gminx, cminx), max(gminy, cminy)
-    sub_maxx, sub_maxy = min(gmaxx, cmaxx), min(gmaxy, cmaxy)
-    if sub_minx >= sub_maxx or sub_miny >= sub_maxy:
-        return None
-    dx, dy = cmaxx - cminx, cmaxy - cminy
-    col_min = max(0, round((sub_minx - cminx) / dx * width))
-    col_max = min(width, round((sub_maxx - cminx) / dx * width))
-    row_min = max(0, round((cmaxy - sub_maxy) / dy * height))
-    row_max = min(height, round((cmaxy - sub_miny) / dy * height))
-    if col_min >= col_max or row_min >= row_max:
-        return None
-    return (sub_minx, sub_miny, sub_maxx, sub_maxy), col_min, row_min, col_max, row_max
+    if is_range_probe(range_header):
+        return range_probe_response(bool(assets), media_type, headers)
 
+    if not assets:
+        if options.empty_no_content:
+            return Response(status_code=204, headers=headers)
+        return Response(content=empty_image(wms.width, wms.height, wms.fmt), media_type=media_type,
+                        headers=headers)
 
-@functools.lru_cache(maxsize=16)
-def _is_geographic(crs: str) -> bool:
-    """Return True if the CRS uses geographic (lat/lon) axis order (cached)."""
-    authority, code = crs.split(":")
-    return pyproj.CRS.from_authority(authority, code).is_geographic
+    async with RENDER_SEM:
+        result = await _read_and_composite(assets, wms)
+
+        if result is None:
+            return Response(content=empty_image(wms.width, wms.height, wms.fmt), media_type=media_type,
+                            headers=headers)
+
+        image = await encode_image(result, wms.fmt)
+
+    return Response(content=image, media_type=media_type, headers=headers)
 
 
 def _parse_params(params: dict) -> WmsParams:
@@ -112,40 +124,87 @@ def _parse_params(params: dict) -> WmsParams:
     time_str = params.get("TIME")
     time = parse_end_time(time_str)
 
-    fmt = TILE_FORMATS.get(params.get("FORMAT", "").lower(), "PNG")
+    fmt = format_from_params(params)
     return WmsParams(layer_name=layer_name, bbox=bbox, crs=crs, srid=srid,
                      width=width, height=height, time=time, fmt=fmt)
 
 
-def _read_one_sync(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
-    """Read a single GeoTIFF into an ImageData (runs in a thread). Returns None if file is missing."""
-    import contextlib  # noqa: PLC0415
-    import logging  # noqa: PLC0415
+@functools.lru_cache(maxsize=16)
+def _is_geographic(crs: str) -> bool:
+    """Return True if the CRS uses geographic (lat/lon) axis order (cached)."""
+    authority, code = crs.split(":")
+    return pyproj.CRS.from_authority(authority, code).is_geographic
 
-    import rasterio  # noqa: PLC0415
-    from rasterio.enums import Resampling  # noqa: PLC0415
-    from rasterio.transform import from_gcps  # noqa: PLC0415
-    from rasterio.vrt import WarpedVRT  # noqa: PLC0415
 
-    dst = CRS.from_authority(*dst_crs.split(":"))
-    try:
-        with rasterio.Env():
-            with contextlib.ExitStack() as stack:
-                src = stack.enter_context(rasterio.open(fp))
-                gcps, gcp_crs = src.gcps
-                if gcps:
-                    dataset = stack.enter_context(
-                        WarpedVRT(src, src_crs=gcp_crs, src_transform=from_gcps(gcps),
-                                  crs=dst, resampling=Resampling.bilinear, add_alpha=True)
-                    )
-                else:
-                    dataset = src
-                cog = stack.enter_context(COGReader(fp, dataset=dataset))
-                return cog.part(bbox, bounds_crs=dst, dst_crs=dst, width=width, height=height,
-                                resampling_method="bilinear")
-    except (OSError, rasterio.errors.RasterioIOError):
-        logging.getLogger(__name__).warning("File not found, skipping: %s", fp)
+async def _read_and_composite(assets, wms):
+    """Read each asset at its canvas sub-region size in parallel, composite in priority order."""
+    canvas = None
+    gaps = None
+    dst_crs_obj = CRS.from_authority(*wms.crs.split(":"))
+
+    regions = []
+    reads = []
+    for asset in assets:
+        region = _granule_pixel_region(asset["bbox"], asset["bbox_srid"], wms.bbox, wms.srid, wms.width, wms.height)
+        if region is None:
+            continue
+        sub_bbox, col_min, row_min, col_max, row_max = region
+        regions.append((col_min, row_min, col_max, row_max))
+        sub_w, sub_h = col_max - col_min, row_max - row_min
+        reads.append(_read_one(asset["filename"], sub_bbox, wms.crs, sub_w, sub_h))
+
+    if not reads:
         return None
+
+    images = await asyncio.gather(*reads)
+    for img, (col_min, row_min, col_max, row_max) in zip(images, regions, strict=False):
+        if img is None:
+            continue
+        if canvas is None:
+            canvas = np.zeros((img.array.shape[0], wms.height, wms.width), dtype=img.array.dtype)
+            gaps = np.ones((wms.height, wms.width), dtype=bool)
+        _merge_sub(canvas, gaps, img, col_min, row_min, col_max, row_max)
+        if not np.any(gaps):
+            break
+
+    if canvas is None:
+        return None
+    full_mask = np.broadcast_to(gaps[np.newaxis, :, :], canvas.shape).copy()
+    return ImageData(np.ma.MaskedArray(canvas, full_mask), bounds=wms.bbox, crs=dst_crs_obj)
+
+
+def _granule_pixel_region(granule_bbox, granule_srid, canvas_bbox, canvas_srid, width, height):
+    """Return (sub_bbox, col_min, row_min, col_max, row_max) or None if no overlap.
+
+    All bboxes are (minx, miny, maxx, maxy).
+    """
+    gminx, gminy, gmaxx, gmaxy = granule_bbox
+    if granule_srid != canvas_srid:
+        tx = _to_request_crs(granule_srid, canvas_srid)
+        corners = [tx.transform(x, y) for x, y in ((gminx, gminy), (gminx, gmaxy), (gmaxx, gminy), (gmaxx, gmaxy))]
+        gminx = min(c[0] for c in corners)
+        gmaxx = max(c[0] for c in corners)
+        gminy = min(c[1] for c in corners)
+        gmaxy = max(c[1] for c in corners)
+    cminx, cminy, cmaxx, cmaxy = canvas_bbox
+    sub_minx, sub_miny = max(gminx, cminx), max(gminy, cminy)
+    sub_maxx, sub_maxy = min(gmaxx, cmaxx), min(gmaxy, cmaxy)
+    if sub_minx >= sub_maxx or sub_miny >= sub_maxy:
+        return None
+    dx, dy = cmaxx - cminx, cmaxy - cminy
+    col_min = max(0, round((sub_minx - cminx) / dx * width))
+    col_max = min(width, round((sub_maxx - cminx) / dx * width))
+    row_min = max(0, round((cmaxy - sub_maxy) / dy * height))
+    row_max = min(height, round((cmaxy - sub_miny) / dy * height))
+    if col_min >= col_max or row_min >= row_max:
+        return None
+    return (sub_minx, sub_miny, sub_maxx, sub_maxy), col_min, row_min, col_max, row_max
+
+
+@functools.lru_cache(maxsize=16)
+def _to_request_crs(src_srid: int, dst_srid: int):
+    """Return a cached pyproj Transformer between two SRIDs."""
+    return pyproj.Transformer.from_crs(f"EPSG:{src_srid}", f"EPSG:{dst_srid}", always_xy=True)
 
 
 @alru_cache(maxsize=config.get("tile_cache_entries"), ttl=300)
@@ -153,6 +212,14 @@ async def _read_one(fp: str, bbox: tuple, dst_crs: str, width: int, height: int)
     """Async LRU-cached granule read with 5-min TTL; coalesces concurrent requests."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(READ_POOL, _read_one_sync, fp, bbox, dst_crs, width, height)
+
+
+def _read_one_sync(fp: str, bbox: tuple, dst_crs: str, width: int, height: int):
+    """Read a GeoTIFF window into an ImageData (runs in a thread). Returns None if file is missing."""
+    dst = CRS.from_authority(*dst_crs.split(":"))
+    return read_cog(fp, dst, lambda cog: cog.part(
+        bbox, bounds_crs=dst, dst_crs=dst, width=width, height=height, resampling_method="bilinear",
+    ))
 
 
 def _merge_sub(canvas, gaps, img, col_min, row_min, col_max, row_max):
@@ -164,81 +231,3 @@ def _merge_sub(canvas, gaps, img, col_min, row_min, col_max, row_max):
     if np.any(fill):
         sub_canvas[:, fill] = img.array.data[:, fill]
         sub_gaps[fill] = False
-
-
-async def _read_and_composite(assets, p):
-    """Read each asset at its canvas sub-region size in parallel, composite in priority order."""
-    canvas = None
-    gaps = None
-    dst_crs_obj = CRS.from_authority(*p.crs.split(":"))
-
-    regions = []
-    reads = []
-    for a in assets:
-        region = _granule_pixel_region(a["bbox"], a["bbox_srid"], p.bbox, p.srid, p.width, p.height)
-        if region is None:
-            continue
-        sub_bbox, col_min, row_min, col_max, row_max = region
-        regions.append((col_min, row_min, col_max, row_max))
-        sub_w, sub_h = col_max - col_min, row_max - row_min
-        reads.append(_read_one(a["filename"], sub_bbox, p.crs, sub_w, sub_h))
-
-    if not reads:
-        return None
-
-    images = await asyncio.gather(*reads)
-    for img, (col_min, row_min, col_max, row_max) in zip(images, regions, strict=False):
-        if img is None:
-            continue
-        if canvas is None:
-            canvas = np.zeros((img.array.shape[0], p.height, p.width), dtype=img.array.dtype)
-            gaps = np.ones((p.height, p.width), dtype=bool)
-        _merge_sub(canvas, gaps, img, col_min, row_min, col_max, row_max)
-        if not np.any(gaps):
-            break
-
-    if canvas is None:
-        return None
-    full_mask = np.broadcast_to(gaps[np.newaxis, :, :], canvas.shape).copy()
-    return ImageData(np.ma.MaskedArray(canvas, full_mask), bounds=p.bbox, crs=dst_crs_obj)
-
-
-async def generate_map(
-    mda, params: dict, duration: timedelta, interval_min: int = 10,
-    force_webp: bool = False, empty_no_content: bool = False,
-) -> Response:
-    """Handle a WMS GetMap request."""
-    p = _parse_params(params)
-    if force_webp:
-        p = dataclasses.replace(p, fmt="WEBP")
-    end_dt = p.time
-    start_dt = end_dt - duration
-
-    latest, assets = await asyncio.gather(
-        mda.get_latest_time(p.layer_name),
-        mda.get_map_assets(p.layer_name, list(p.bbox), start_dt, end_dt, src_srid=p.srid),
-    )
-
-    headers = {"Cache-Control": cache_control(latest, end_dt, interval_min,
-                                              stepped=config.get("timestep_mode") == "stepped")}
-    media_type = MEDIA_TYPES[p.fmt]
-
-    if not assets:
-        if empty_no_content:
-            return Response(status_code=204, headers=headers)
-        return Response(content=empty_image(p.width, p.height, p.fmt), media_type=media_type,
-                        headers=headers)
-
-    async with RENDER_SEM:
-        result = await _read_and_composite(assets, p)
-
-        if result is None:
-            return Response(content=empty_image(p.width, p.height, p.fmt), media_type=media_type,
-                            headers=headers)
-
-        render_kwargs = {"img_format": p.fmt} if p.fmt != "PNG" else {"img_format": "PNG", "zlevel": 1}
-        image = await asyncio.get_running_loop().run_in_executor(
-            None, functools.partial(result.render, **render_kwargs),
-        )
-
-    return Response(content=image, media_type=media_type, headers=headers)

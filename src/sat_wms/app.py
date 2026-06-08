@@ -11,9 +11,10 @@ from fastapi.templating import Jinja2Templates
 from sat_wms.capabilities import generate_capabilities
 from sat_wms.config import config, get_cors_allow_origins, get_supported_crs
 from sat_wms.local_mda import make_mda
-from sat_wms.time_utils import parse_duration, parse_interval_min
+from sat_wms.rendering import RenderOptions, format_from_params
+from sat_wms.time_utils import parse_duration
 from sat_wms.tms_registry import build_registry
-from sat_wms.wmts import generate_tile, generate_wmts_capabilities
+from sat_wms.wmts import TileCoord, generate_tile, generate_wmts_capabilities
 
 logger = logging.getLogger("sat_wms.access")
 _templates = Jinja2Templates(directory=str(files("sat_wms").joinpath("templates")))
@@ -50,55 +51,6 @@ async def log_requests(request: Request, call_next):
     return response
 
 
-def _wms_exception(msg: str, code: str | None = None) -> Response:
-    """Return a WMS 1.3.0 ServiceException response."""
-    content = _templates.get_template("service_exception.xml.j2").render(msg=msg, code=code)
-    return Response(content=content, media_type="text/xml", status_code=400)
-
-
-def _strip_layer_prefix(layer: str, prefix: str) -> str:
-    """Strip a known prefix from a client-supplied layer name."""
-    if prefix and layer.startswith(prefix):
-        return layer[len(prefix):]
-    return layer
-
-
-def _uppercase_params(request: Request) -> dict[str, str]:
-    """Return query parameters with keys uppercased for case-insensitive WMS/WMTS dispatch."""
-    return {k.upper(): v for k, v in request.query_params.items()}
-
-
-async def _handle_wmts_get_tile(mda, params: dict, prefix: str, duration_str: str) -> Response:
-    """Parse WMTS KVP GetTile parameters and dispatch to generate_tile."""
-    layer = _strip_layer_prefix(params.get("LAYER") or "", prefix)
-    tms_id = params.get("TILEMATRIXSET")
-    z_str = params.get("TILEMATRIX")
-    y_str = params.get("TILEROW")
-    x_str = params.get("TILECOL")
-    if not layer or None in (tms_id, z_str, y_str, x_str):
-        raise HTTPException(status_code=400, detail="Missing required WMTS KVP parameters.")
-    try:
-        z, y, x = int(z_str), int(y_str), int(x_str)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="TILEMATRIX, TILEROW, TILECOL must be integers.") from exc
-
-    return await generate_tile(
-        mda,
-        layer=layer,
-        tms_id=tms_id,
-        z=z, y=y, x=x,
-        duration=parse_duration(duration_str),
-        time_str=params.get("TIME"),
-        fmt={"image/png": "PNG", "image/webp": "WEBP"}.get(
-            (params.get("FORMAT") or "").lower(), "PNG"
-        ),
-        interval_min=parse_interval_min(config.get("granule_interval")),
-        force_webp=bool(config.get("force_webp")),
-        empty_no_content=bool(config.get("empty_no_content")),
-        wmts_max_zoom=int(config.get("wmts_max_zoom")),
-    )
-
-
 @app.get("/{duration_str}/wmts/")
 @app.get("/{duration_str}/wmts")
 async def wmts_endpoint(duration_str: str, request: Request):
@@ -108,15 +60,16 @@ async def wmts_endpoint(duration_str: str, request: Request):
     prefix = config.get("layer_name_prefix") or ""
     request_type = params.get("REQUEST", "GetCapabilities").upper()
     if request_type == "GETCAPABILITIES":
+        options = RenderOptions.from_config()
         online_resource = f"{config.get('base_url')}/{duration_str}/"
         return await generate_wmts_capabilities(
             mda,
             request=request,
             online_resource=online_resource,
             supported_crs=get_supported_crs(),
-            interval_min=parse_interval_min(config.get("granule_interval")),
-            force_webp=bool(config.get("force_webp")),
-            wmts_max_zoom=int(config.get("wmts_max_zoom")),
+            interval_min=options.interval_min,
+            force_webp=options.force_webp,
+            wmts_max_zoom=options.wmts_max_zoom,
             duration_str=duration_str,
             layer_name_prefix=prefix,
         )
@@ -124,7 +77,8 @@ async def wmts_endpoint(duration_str: str, request: Request):
     if request_type and request_type.upper() != "GETTILE":
         raise HTTPException(status_code=400, detail="Only GetTile is supported at this KVP endpoint.")
 
-    return await _handle_wmts_get_tile(mda, params, prefix, duration_str)
+    return await _handle_wmts_get_tile(mda, params, prefix, duration_str,
+                                       range_header=request.headers.get("range"))
 
 
 @app.get("/{duration_str}/wmts/{layer}/{tms_id}/{z}/{y}/{x}")
@@ -135,20 +89,10 @@ async def wmts_tile_endpoint(
     mda = request.app.state.mda
     params = _uppercase_params(request)
     prefix = config.get("layer_name_prefix") or ""
-    return await generate_tile(
-        mda,
-        layer=_strip_layer_prefix(layer, prefix),
-        tms_id=tms_id,
-        z=z, y=y, x=x,
-        duration=parse_duration(duration_str),
-        time_str=params.get("TIME"),
-        fmt={"image/png": "PNG", "image/webp": "WEBP"}.get(
-            (params.get("FORMAT") or "").lower(), "PNG"
-        ),
-        interval_min=parse_interval_min(config.get("granule_interval")),
-        force_webp=bool(config.get("force_webp")),
-        empty_no_content=bool(config.get("empty_no_content")),
-        wmts_max_zoom=int(config.get("wmts_max_zoom")),
+    tile = TileCoord(tms_id, z, y, x)
+    return await _dispatch_get_tile(
+        mda, _strip_layer_prefix(layer, prefix), tile, params, duration_str,
+        request.headers.get("range"),
     )
 
 
@@ -163,10 +107,8 @@ async def wms_endpoint(duration_str: str, request: Request):
         return _wms_exception(f"VERSION {version!r} is not supported; only 1.3.0 is implemented.")
 
     mda = request.app.state.mda
+    options = RenderOptions.from_config()
     online_resource = f"{config.get('base_url')}/{duration_str}/"
-    interval_min = parse_interval_min(config.get("granule_interval"))
-    force_webp = bool(config.get("force_webp"))
-    empty_no_content = bool(config.get("empty_no_content"))
     prefix = config.get("layer_name_prefix") or ""
 
     match (params.get("REQUEST") or "").upper():
@@ -176,8 +118,8 @@ async def wms_endpoint(duration_str: str, request: Request):
                 request=request,
                 online_resource=online_resource,
                 supported_crs=get_supported_crs(),
-                interval_min=interval_min,
-                force_webp=force_webp,
+                interval_min=options.interval_min,
+                force_webp=options.force_webp,
                 duration_str=duration_str,
                 layer_name_prefix=prefix,
             )
@@ -190,9 +132,8 @@ async def wms_endpoint(duration_str: str, request: Request):
                 params["LAYERS"] = _strip_layer_prefix(params["LAYERS"], prefix)
             try:
                 return await generate_map(mda, params, parse_duration(duration_str),
-                                          interval_min=interval_min,
-                                          force_webp=force_webp,
-                                          empty_no_content=empty_no_content)
+                                          options=options,
+                                          range_header=request.headers.get("range"))
             except CRSError as exc:
                 return _wms_exception(str(exc), code="InvalidCRS")
             except WmsRequestError as exc:
@@ -202,3 +143,53 @@ async def wms_endpoint(duration_str: str, request: Request):
                 return _wms_exception("An internal server error occurred.")
         case _:
             return Response("Unknown REQUEST type", status_code=400)
+
+
+async def _handle_wmts_get_tile(
+    mda, params: dict, prefix: str, duration_str: str, range_header: str | None = None,
+) -> Response:
+    """Parse WMTS KVP GetTile parameters and dispatch to generate_tile."""
+    layer = _strip_layer_prefix(params.get("LAYER") or "", prefix)
+    tms_id = params.get("TILEMATRIXSET")
+    z_str = params.get("TILEMATRIX")
+    y_str = params.get("TILEROW")
+    x_str = params.get("TILECOL")
+    if not layer or None in (tms_id, z_str, y_str, x_str):
+        raise HTTPException(status_code=400, detail="Missing required WMTS KVP parameters.")
+    try:
+        tile = TileCoord(tms_id, int(z_str), int(y_str), int(x_str))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="TILEMATRIX, TILEROW, TILECOL must be integers.") from exc
+
+    return await _dispatch_get_tile(mda, layer, tile, params, duration_str, range_header)
+
+
+async def _dispatch_get_tile(
+    mda, layer: str, tile: TileCoord, params: dict, duration_str: str, range_header: str | None,
+) -> Response:
+    """Call generate_tile with request-derived format and the config-sourced render options."""
+    return await generate_tile(
+        mda, layer, tile, parse_duration(duration_str),
+        time_str=params.get("TIME"),
+        fmt=format_from_params(params),
+        options=RenderOptions.from_config(),
+        range_header=range_header,
+    )
+
+
+def _uppercase_params(request: Request) -> dict[str, str]:
+    """Return query parameters with keys uppercased for case-insensitive WMS/WMTS dispatch."""
+    return {k.upper(): v for k, v in request.query_params.items()}
+
+
+def _strip_layer_prefix(layer: str, prefix: str) -> str:
+    """Strip a known prefix from a client-supplied layer name."""
+    if prefix and layer.startswith(prefix):
+        return layer[len(prefix):]
+    return layer
+
+
+def _wms_exception(msg: str, code: str | None = None) -> Response:
+    """Return a WMS 1.3.0 ServiceException response."""
+    content = _templates.get_template("service_exception.xml.j2").render(msg=msg, code=code)
+    return Response(content=content, media_type="text/xml", status_code=400)

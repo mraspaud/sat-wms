@@ -2,6 +2,7 @@
 import os
 
 import numpy as np
+import pytest
 from rio_tiler.models import ImageData
 
 
@@ -136,6 +137,22 @@ def test_cache_control_tz_naive_snapshot_gives_long_ttl():
 
     assert cache_control(latest_naive, snapshot_aware, interval_min=5) == \
         "public, max-age=86400, immutable"
+
+
+@pytest.mark.parametrize(("header", "expected"), [
+    ("bytes=0-0", True),
+    ("bytes= 0-0", True),
+    ("BYTES=0-0", True),
+    (None, False),
+    ("bytes=0-", False),
+    ("bytes=0-100", False),
+    ("bytes=0-0,5-10", False),
+])
+def test_is_range_probe(header, expected):
+    """is_range_probe recognises only the 'bytes=0-0' presence probe."""
+    from sat_wms.rendering import is_range_probe
+
+    assert is_range_probe(header) is expected
 
 
 def test_cache_control_stepped_non_latest_uses_short_max_age():

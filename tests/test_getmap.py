@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from sat_wms.rendering import RenderOptions
+
 VALID_PARAMS = {
     "LAYERS": "true_color_day",
     "BBOX": "-1320000,-2781000,569250,245250",
@@ -88,7 +90,8 @@ async def test_generate_map_empty_no_content_returns_204(local_mda):
     from sat_wms.getmap import generate_map
 
     params = {**VALID_PARAMS, "TIME": "2099-01-01T00:00:00Z"}
-    res = await generate_map(local_mda, params, timedelta(hours=1), empty_no_content=True)
+    res = await generate_map(local_mda, params, timedelta(hours=1),
+                             options=RenderOptions(empty_no_content=True))
     assert res.status_code == 204
     assert not res.body
 
@@ -99,7 +102,8 @@ async def test_generate_map_empty_no_content_false_still_returns_image(local_mda
     from sat_wms.getmap import generate_map
 
     params = {**VALID_PARAMS, "TIME": "2099-01-01T00:00:00Z"}
-    res = await generate_map(local_mda, params, timedelta(hours=1), empty_no_content=False)
+    res = await generate_map(local_mda, params, timedelta(hours=1),
+                             options=RenderOptions(empty_no_content=False))
     assert res.status_code == 200
     assert res.body[:4] == b"\x89PNG"
 
@@ -109,7 +113,8 @@ async def test_force_webp_overrides_png_request(synth_mda):
     """force_webp=True returns WebP even when the client requests image/png."""
     from sat_wms.getmap import generate_map
 
-    res = await generate_map(synth_mda, VALID_PARAMS, timedelta(hours=1), force_webp=True)
+    res = await generate_map(synth_mda, VALID_PARAMS, timedelta(hours=1),
+                             options=RenderOptions(force_webp=True))
     assert res.media_type == "image/webp"
     assert res.body[8:12] == b"WEBP"
 
@@ -240,7 +245,7 @@ def test_read_one_uses_bilinear_resampling():
 
     import rasterio
     with patch("rasterio.open", return_value=mock_src), \
-         patch("sat_wms.getmap.COGReader", return_value=mock_cog):
+         patch("rio_tiler.io.COGReader", return_value=mock_cog):
         with rasterio.Env():
             _read_one_sync("test.tif", (0.0, 0.0, 1.0, 1.0), "EPSG:3575", 256, 256)
 

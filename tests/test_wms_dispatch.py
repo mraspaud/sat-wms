@@ -182,6 +182,43 @@ def test_getmap_zero_width_returns_wms_exception(client):
     assert "ServiceException" in res.text
 
 
+def test_getmap_range_probe_with_data_returns_206(client):
+    """A GetMap with 'Range: bytes=0-0' over an area with data returns 206 without rendering."""
+    res = client.get("/30m/", params={
+        "REQUEST": "GetMap", "LAYERS": "true_color_day",
+        "CRS": "EPSG:3575", "BBOX": "-1320000,-2781000,569250,245250",
+        "WIDTH": "256", "HEIGHT": "256", "TIME": "2026-03-24T05:10:00Z",
+    }, headers={"Range": "bytes=0-0"})
+    assert res.status_code == 206
+    assert res.headers.get("Content-Range") == "bytes 0-0/*"
+
+
+def test_getmap_range_probe_without_data_returns_204(client):
+    """A GetMap probe over an area/time with no assets returns 204."""
+    res = client.get("/30m/", params={
+        "REQUEST": "GetMap", "LAYERS": "true_color_day",
+        "CRS": "EPSG:3575", "BBOX": "-1320000,-2781000,569250,245250",
+        "WIDTH": "256", "HEIGHT": "256", "TIME": "2099-01-01T00:00:00Z",
+    }, headers={"Range": "bytes=0-0"})
+    assert res.status_code == 204
+
+
+def test_getmap_range_probe_skips_render(client, monkeypatch):
+    """The probe must not render: it returns 206 even when the compositor would fail."""
+    import sat_wms.getmap as gm
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("render should not run for a probe")
+
+    monkeypatch.setattr(gm, "_read_and_composite", _boom)
+    res = client.get("/30m/", params={
+        "REQUEST": "GetMap", "LAYERS": "true_color_day",
+        "CRS": "EPSG:3575", "BBOX": "-1320000,-2781000,569250,245250",
+        "WIDTH": "256", "HEIGHT": "256", "TIME": "2026-03-24T05:10:00Z",
+    }, headers={"Range": "bytes=0-0"})
+    assert res.status_code == 206
+
+
 def test_strip_layer_prefix_removes_known_prefix():
     from sat_wms.app import _strip_layer_prefix
     assert _strip_layer_prefix("Sentinel-1 SAR sar-ice-log", "Sentinel-1 SAR ") == "sar-ice-log"

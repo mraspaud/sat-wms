@@ -105,7 +105,11 @@ async def test_wmts_capabilities_hourly_interval_uses_iso_hours(local_mda):
 
 # Tile (x=3, y=4, z=3) in NorthPolarLAEAEurope intersects the test_tif bbox
 # (-1320000, -2781000, 569250, 245250) ∩ tile (-1350000, -1350000, 0, 0).
-_TILE_KW = {"layer": "true_color_day", "tms_id": "NorthPolarLAEAEurope", "z": 3, "y": 4, "x": 3}
+from sat_wms.rendering import RenderOptions  # noqa: E402
+from sat_wms.wmts import TileCoord  # noqa: E402
+
+_TILE = TileCoord("NorthPolarLAEAEurope", 3, 4, 3)
+_TILE_KW = {"layer": "true_color_day", "tile": _TILE}
 
 
 @pytest.mark.asyncio
@@ -113,8 +117,8 @@ async def test_generate_tile_unknown_tms_returns_400(local_mda):
     """An unknown TileMatrixSet identifier returns a 400 OWS exception."""
     from sat_wms.wmts import generate_tile
 
-    resp = await generate_tile(local_mda, layer="true_color_day", tms_id="DoesNotExist",
-                                z=3, y=4, x=3, duration=timedelta(hours=1))
+    resp = await generate_tile(local_mda, "true_color_day", TileCoord("DoesNotExist", 3, 4, 3),
+                                duration=timedelta(hours=1))
     assert resp.status_code == 400
     assert b"InvalidParameterValue" in resp.body
 
@@ -124,7 +128,8 @@ async def test_generate_tile_z_out_of_range_returns_400(local_mda):
     """A zoom level beyond wmts_max_zoom returns a 400 OWS exception."""
     from sat_wms.wmts import generate_tile
 
-    resp = await generate_tile(local_mda, **{**_TILE_KW, "z": 99}, duration=timedelta(hours=1))
+    resp = await generate_tile(local_mda, "true_color_day", TileCoord("NorthPolarLAEAEurope", 99, 4, 3),
+                                duration=timedelta(hours=1))
     assert resp.status_code == 400
     assert b"TileOutOfRange" in resp.body
 
@@ -134,7 +139,7 @@ async def test_generate_tile_no_assets_returns_transparent_png(local_mda):
     """A tile request with no matching granules returns a transparent PNG."""
     from sat_wms.wmts import generate_tile
 
-    resp = await generate_tile(local_mda, **{**_TILE_KW, "z": 3, "y": 4, "x": 3},
+    resp = await generate_tile(local_mda, **_TILE_KW,
                                 duration=timedelta(hours=1),
                                 time_str="2099-01-01T00:00:00Z")
     assert resp.status_code == 200
@@ -200,7 +205,33 @@ async def test_generate_tile_empty_no_content_returns_204(local_mda):
     from sat_wms.wmts import generate_tile
 
     resp = await generate_tile(local_mda, **_TILE_KW, duration=timedelta(hours=1),
-                                time_str="2099-01-01T00:00:00Z", empty_no_content=True)
+                                time_str="2099-01-01T00:00:00Z",
+                                options=RenderOptions(empty_no_content=True))
+    assert resp.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_range_probe_with_data_returns_206(synth_mda):
+    """A GetTile probe (Range: bytes=0-0) over a tile with assets returns 206 without rendering."""
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    resp = await generate_tile(synth_mda, **_TILE_KW, duration=timedelta(hours=6),
+                               time_str="2026-03-24T06:00:00Z", range_header="bytes=0-0")
+    assert resp.status_code == 206
+    assert resp.headers.get("Content-Range") == "bytes 0-0/*"
+
+
+@pytest.mark.asyncio
+async def test_generate_tile_range_probe_without_data_returns_204(local_mda):
+    """A GetTile probe over a tile with no assets returns 204."""
+    from sat_wms.tms_registry import build_registry
+    from sat_wms.wmts import generate_tile
+
+    build_registry(["EPSG:3575"])
+    resp = await generate_tile(local_mda, **_TILE_KW, duration=timedelta(hours=1),
+                               time_str="2099-01-01T00:00:00Z", range_header="bytes=0-0")
     assert resp.status_code == 204
 
 
@@ -210,7 +241,8 @@ async def test_generate_tile_force_webp_overrides_png(synth_mda):
     from sat_wms.wmts import generate_tile
 
     resp = await generate_tile(synth_mda, **_TILE_KW, duration=timedelta(hours=6),
-                                time_str="2026-03-24T06:00:00Z", fmt="PNG", force_webp=True)
+                                time_str="2026-03-24T06:00:00Z", fmt="PNG",
+                                options=RenderOptions(force_webp=True))
     assert resp.media_type == "image/webp"
 
 
@@ -281,9 +313,8 @@ async def test_generate_tile_serves_from_disk_cache(tmp_path):
     with config.set({"tile_cache_dir": str(tmp_path)}):
         resp = await generate_tile(
             StubMDA(),
-            layer="test_layer",
-            tms_id="NorthPolarLAEAEurope",
-            z=3, y=4, x=5,
+            "test_layer",
+            TileCoord("NorthPolarLAEAEurope", 3, 4, 5),
             duration=timedelta(hours=1),
             time_str="2026-01-01T12:00:00Z",
             fmt="PNG",
@@ -308,9 +339,8 @@ async def test_generate_tile_writes_rendered_tile_to_cache(tmp_path, synth_mda):
     with config.set({"tile_cache_dir": str(tmp_path)}):
         resp = await generate_tile(
             synth_mda,
-            layer="true_color_day",
-            tms_id="NorthPolarLAEAEurope",
-            z=3, y=4, x=3,
+            "true_color_day",
+            TileCoord("NorthPolarLAEAEurope", 3, 4, 3),
             duration=timedelta(hours=6),
             time_str="2026-03-24T06:00:00Z",
             fmt="PNG",
@@ -431,6 +461,36 @@ def test_wmts_tile_endpoint_accepts_lowercase_format(wmts_client):
     )
     assert res.status_code == 200
     assert res.headers["content-type"] == "image/webp"
+
+
+def test_wmts_tile_endpoint_range_probe_is_wired_through(wmts_client):
+    """A Range: bytes=0-0 probe on the RESTful tile path short-circuits (204 here, not a 200 image).
+
+    Over local_mda the granule files are absent on disk, so a normal request renders a
+    transparent 200 PNG; a probe must instead report 'no data' as 204, proving the
+    Range header reached generate_tile.
+    """
+    from sat_wms.tms_registry import build_registry
+    build_registry(["EPSG:3575"])
+    res = wmts_client.get(
+        "/6h/wmts/true_color_day/NorthPolarLAEAEurope/3/4/3",
+        params={"TIME": "2026-03-24T06:00:00Z"},
+        headers={"Range": "bytes=0-0"},
+    )
+    assert res.status_code == 204
+
+
+def test_wmts_kvp_gettile_range_probe_is_wired_through(wmts_client):
+    """A Range: bytes=0-0 probe on the KVP GetTile endpoint short-circuits to 204 (no disk data)."""
+    from sat_wms.tms_registry import build_registry
+    build_registry(["EPSG:3575"])
+    res = wmts_client.get("/6h/wmts/", params={
+        "REQUEST": "GetTile", "LAYER": "true_color_day",
+        "TILEMATRIXSET": "NorthPolarLAEAEurope",
+        "TILEMATRIX": "3", "TILEROW": "4", "TILECOL": "3",
+        "TIME": "2026-03-24T06:00:00Z",
+    }, headers={"Range": "bytes=0-0"})
+    assert res.status_code == 204
 
 
 def test_wmts_tile_endpoint_returns_png(wmts_client):
@@ -685,7 +745,7 @@ async def test_generate_tile_stepped_cache_hit_last_step_has_short_ttl(tmp_path)
 
     with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
         resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
-                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", interval_min=10)
+                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", options=RenderOptions(interval_min=10))
 
     assert resp.headers["cache-control"] == "public, max-age=60, stale-while-revalidate=60"
 
@@ -720,7 +780,7 @@ async def test_generate_tile_stepped_cache_hit_snapshot_has_long_ttl(tmp_path):
 
     with cfg.config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
         resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
-                                   time_str="2026-04-21T00:00:00Z", fmt="PNG", interval_min=10)
+                                   time_str="2026-04-21T00:00:00Z", fmt="PNG", options=RenderOptions(interval_min=10))
 
     assert resp.headers["cache-control"] == "public, max-age=300"
 
@@ -745,7 +805,7 @@ async def test_generate_tile_stepped_no_content_last_step_has_short_ttl():
 
     with cfg.config.set({"timestep_mode": "stepped"}):
         resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
-                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", interval_min=10)
+                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", options=RenderOptions(interval_min=10))
 
     assert resp.headers["cache-control"] == "public, max-age=60, stale-while-revalidate=60"
 
@@ -771,7 +831,7 @@ async def test_generate_tile_stepped_no_content_snapshot_has_long_ttl():
 
     with cfg.config.set({"timestep_mode": "stepped"}):
         resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
-                                   time_str="2026-04-21T00:00:00Z", fmt="PNG", interval_min=10)
+                                   time_str="2026-04-21T00:00:00Z", fmt="PNG", options=RenderOptions(interval_min=10))
 
     assert resp.headers["cache-control"] == "public, max-age=300"
 
@@ -805,7 +865,7 @@ async def test_generate_tile_stepped_latest_step_short_ttl_with_microsecond_late
     with cfg.config.set({"timestep_mode": "stepped"}):
         # time_str produces a tz-aware end_dt; latest is tz-naive → comparison breaks
         resp = await generate_tile(LatestMDA(), **_TILE_KW, duration=timedelta(hours=24),
-                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", interval_min=10)
+                                   time_str="2026-04-21T14:37:00Z", fmt="PNG", options=RenderOptions(interval_min=10))
 
     assert resp.headers["cache-control"] == "public, max-age=60, stale-while-revalidate=60"
 
@@ -997,9 +1057,8 @@ async def test_generate_tile_does_not_serve_stale_when_db_lists_missing_file(tmp
     with config.set({"tile_cache_dir": str(tmp_path), "timestep_mode": "stepped"}):
         resp = await generate_tile(
             StubMDA(),
-            layer="test_layer",
-            tms_id="NorthPolarLAEAEurope",
-            z=3, y=4, x=5,
+            "test_layer",
+            TileCoord("NorthPolarLAEAEurope", 3, 4, 5),
             duration=timedelta(hours=1),
             time_str="2026-01-01T12:00:00Z",
             fmt="PNG",

@@ -1,16 +1,20 @@
 """Shared tile-rendering infrastructure (thread pool, semaphore, image helpers)."""
 import asyncio
+import functools
 import os
 import struct
 import warnings
 import zlib
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
+from fastapi import Response
 from rio_tiler.models import ImageData
 
-from sat_wms.time_utils import floor_dt
+from sat_wms.config import config
+from sat_wms.time_utils import floor_dt, parse_interval_min
 
 # GDAL performance hints for Cloud-Optimized GeoTIFFs.
 os.environ.setdefault("GDAL_CACHEMAX", "1024")                      # tile cache (MB) — doubled for large SAR COGs
@@ -36,6 +40,121 @@ TILE_FORMATS: dict[str, str] = {"image/png": "PNG", "image/webp": "WEBP"}
 MEDIA_TYPES: dict[str, str] = {"PNG": "image/png", "WEBP": "image/webp"}
 
 
+@dataclass(frozen=True)
+class RenderOptions:
+    """Server-side rendering knobs sourced from config, threaded into the render entry points.
+
+    Bundled so handlers read config once (``from_config``) and pass a single object instead
+    of repeating the same four arguments. ``wmts_max_zoom`` is only meaningful for tiles.
+    """
+
+    interval_min: int = 10
+    force_webp: bool = False
+    empty_no_content: bool = False
+    wmts_max_zoom: int = 9
+
+    @classmethod
+    def from_config(cls) -> "RenderOptions":
+        """Build options from the live application config (reads each key once)."""
+        return cls(
+            interval_min=parse_interval_min(config.get("granule_interval")),
+            force_webp=bool(config.get("force_webp")),
+            empty_no_content=bool(config.get("empty_no_content")),
+            wmts_max_zoom=int(config.get("wmts_max_zoom")),
+        )
+
+
+# Shared immutable default so render entry points avoid a call in their argument defaults.
+DEFAULT_RENDER_OPTIONS = RenderOptions()
+
+
+def format_from_params(params: dict) -> str:
+    """Resolve the requested image FORMAT to an internal format name, defaulting to PNG."""
+    return TILE_FORMATS.get((params.get("FORMAT") or "").lower(), "PNG")
+
+
+def is_range_probe(range_header: str | None) -> bool:
+    """Return True for the ``bytes=0-0`` presence probe some clients send before fetching."""
+    if range_header is None:
+        return False
+    return range_header.replace(" ", "").lower() == "bytes=0-0"
+
+
+def range_probe_response(data_available: bool, media_type: str, headers: dict | None = None) -> Response:
+    """Answer a ``bytes=0-0`` probe without rendering: 206 if data is available, else 204.
+
+    ``data_available`` is the probe's answer (does an image exist for this bbox/time?),
+    not a behaviour switch. The 206 carries a single dummy byte so the range is
+    satisfiable; the client only needs the status to decide whether to fetch the image.
+    """
+    if not data_available:
+        return Response(status_code=204, headers=headers)
+    probe_headers = {"Accept-Ranges": "bytes", "Content-Range": "bytes 0-0/*"}
+    if headers:
+        probe_headers = {**headers, **probe_headers}
+    return Response(content=b"\x00", status_code=206, media_type=media_type, headers=probe_headers)
+
+
+def read_cog(fp: str, dst_crs, read, *, tms=None):
+    """Open a COG and apply `read(cog)`, returning None if the file is missing on disk.
+
+    Rasters carrying GCPs (e.g. raw SAR granules) are pre-wrapped in a WarpedVRT
+    targeting `dst_crs` so GDAL overview selection operates in the destination CRS's
+    units. `read` is the caller's read strategy (e.g. ``cog.part(...)`` or
+    ``cog.tile(...)``) and may itself return None for out-of-bounds reads. When `tms`
+    is given it is forwarded to COGReader; otherwise COGReader keeps its own default.
+
+    Imports are local so this stays cheap to import and so the thread-pool callers
+    (and test monkeypatches of rasterio/rio_tiler) resolve the real objects at call time.
+    """
+    import contextlib  # noqa: PLC0415
+    import logging  # noqa: PLC0415
+
+    import rasterio  # noqa: PLC0415
+    from rasterio.enums import Resampling  # noqa: PLC0415
+    from rasterio.transform import from_gcps  # noqa: PLC0415
+    from rasterio.vrt import WarpedVRT  # noqa: PLC0415
+    from rio_tiler.io import COGReader  # noqa: PLC0415
+
+    try:
+        with rasterio.Env():
+            with contextlib.ExitStack() as stack:
+                src = stack.enter_context(rasterio.open(fp))
+                gcps, gcp_crs = src.gcps
+                if gcps:
+                    dataset = stack.enter_context(
+                        WarpedVRT(src, src_crs=gcp_crs, src_transform=from_gcps(gcps),
+                                  crs=dst_crs, resampling=Resampling.bilinear, add_alpha=True)
+                    )
+                else:
+                    dataset = src
+                reader_kwargs = {"tms": tms} if tms is not None else {}
+                cog = stack.enter_context(COGReader(fp, dataset=dataset, **reader_kwargs))
+                return read(cog)
+    except (OSError, rasterio.errors.RasterioIOError):
+        logging.getLogger(__name__).warning("File not found, skipping: %s", fp)
+        return None
+
+
+async def encode_image(image_data: ImageData, fmt: str) -> bytes:
+    """Encode an ImageData to bytes in `fmt`, off the event loop.
+
+    PNG uses zlevel=1 (fast) since these tiles are re-encoded on every cache miss.
+    """
+    render_kwargs = {"img_format": fmt} if fmt != "PNG" else {"img_format": "PNG", "zlevel": 1}
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, functools.partial(image_data.render, **render_kwargs))
+
+
+def empty_image(width: int, height: int, img_format: str) -> bytes:
+    """Return a fully transparent image in the requested format."""
+    if img_format == "PNG":
+        return _empty_png(width, height)
+    mask = np.ones((1, height, width), dtype=bool)
+    data = np.ma.MaskedArray(np.zeros((1, height, width), dtype=np.uint8), mask)
+    return ImageData(data).render(img_format=img_format)
+
+
 def _empty_png(width: int, height: int) -> bytes:
     """Return a fully transparent RGBA PNG using stdlib only."""
     def chunk(tag: bytes, data: bytes) -> bytes:
@@ -46,15 +165,6 @@ def _empty_png(width: int, height: int) -> bytes:
     idat = chunk(b"IDAT", zlib.compress(raw, 1))
     iend = chunk(b"IEND", b"")
     return b"\x89PNG\r\n\x1a\n" + ihdr + idat + iend
-
-
-def empty_image(width: int, height: int, img_format: str) -> bytes:
-    """Return a fully transparent image in the requested format."""
-    if img_format == "PNG":
-        return _empty_png(width, height)
-    mask = np.ones((1, height, width), dtype=bool)
-    data = np.ma.MaskedArray(np.zeros((1, height, width), dtype=np.uint8), mask)
-    return ImageData(data).render(img_format=img_format)
 
 
 def cache_control(latest: datetime | None, end_dt: datetime, interval_min: int, stepped: bool = False) -> str:
